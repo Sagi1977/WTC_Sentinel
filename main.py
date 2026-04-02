@@ -15,12 +15,6 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 
-# הנבחרת שלך (Anchor & Turbo)
-MY_PORTFOLIO = {
-    "MBAV": {"score": 94.0}, "STKL": {"score": 94.0}, "ALF": {"score": 93.1},
-    "ANAB": {"score": 84.9}, "KNSA": {"score": 84.0}
-}
-
 def send_telegram_msg(text):
     if not text: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -40,8 +34,7 @@ def download_latest_file(service, prefix):
         query = f"name contains '{prefix}' and mimeType = 'text/csv'"
         res = service.files().list(q=query, orderBy="createdTime desc").execute()
         files = res.get('files', [])
-        if not files: return None, f"❌ קובץ {prefix} לא נמצא"
-        
+        if not files: return None, "Missing"
         file_id = files[0]['id']
         req = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
@@ -49,10 +42,30 @@ def download_latest_file(service, prefix):
         fh.seek(0)
         df = pd.read_csv(fh)
         df.columns = [c.strip().capitalize() for c in df.columns]
-        return df, f"✅ נטען: {prefix}"
-    except: return None, f"❌ שגיאה בטעינת {prefix}"
+        return df, "Success"
+    except: return None, "Error"
 
-# --- דאשבורד וניתוח ---
+# --- 1. בניית רשימת נכסי המפתח (Dynamic Watchlist) ---
+def build_dynamic_watchlist(service):
+    watchlist = {}
+    prefixes = ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]
+    for prefix in prefixes:
+        df, _ = download_latest_file(service, prefix)
+        if df is not None:
+            # איתור העמודה הנכונה
+            target_col = next((c for c in df.columns if 'Final' in c), None)
+            if target_col:
+                # סינון לפי מילות המפתח שהגדרת ב-CSV
+                filtered = df[df[target_col].str.contains('Anchor|Turbo|Top 5', na=False, case=False)]
+                for _, row in filtered.iterrows():
+                    ticker = str(row['Ticker']).strip()
+                    watchlist[ticker] = {
+                        "type": str(row[target_col]).split('(')[0].strip(), # ניקוי השם
+                        "score": row.get('Score', 0)
+                    }
+    return watchlist
+
+# --- 2. דאשבורד ופורטפוליו ---
 def get_market_dashboard():
     try:
         spy = yf.Ticker("SPY").history(period="2d")
@@ -64,10 +77,11 @@ def get_market_dashboard():
         return f"📊 *WTC Sentinel Dashboard*\n`--------------------------`\n🚦 *Status:* `{status}` {emoji}\n📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
     except: return "⚠️ Dashboard Offline\n\n"
 
-def get_portfolio_snapshot():
-    report = "📈 *My Portfolio Watch (Anchor & Turbo)*\n"
-    report += "`Ticker | Price | Chg% | Status | Score`\n"
-    for t, info in MY_PORTFOLIO.items():
+def get_portfolio_snapshot(watchlist):
+    if not watchlist: return "⚠️ לא נמצאו נכסי מפתח בקבצים.\n"
+    report = "📈 *My Portfolio Watch (Dynamic)*\n"
+    report += "`Type       | Ticker | Price | Chg% | Status`\n"
+    for t, info in watchlist.items():
         try:
             s = yf.Ticker(t)
             h = s.history(period="2d")
@@ -75,44 +89,37 @@ def get_portfolio_snapshot():
             curr = h['Close'].iloc[-1]
             p_chg = ((curr / h['Close'].iloc[-2]) - 1) * 100
             oh = d5.iloc[:6]['High'].max()
-            stat = "✅ Breakout" if curr > oh else "❌ Below"
-            report += f"`{t:<5} | {curr:>6.2f} | {p_chg:>+5.1f}% | {stat:<10} | {info['score']}`\n"
+            stat = "✅ Break" if curr > oh else "❌ Below"
+            report += f"`{info['type'][:10]:<10} | {t:<5} | {curr:>6.2f} | {p_chg:>+5.1f}% | {stat:<7}`\n"
         except: continue
     return report + "\n"
 
+# --- 3. ניתוח AI מוסדי ---
 def get_ai_report(custom_prompt=None):
     news = ""
-    for t in ["^GSPC", "^VIX", "GC=F"]:
+    for t in ["^GSPC", "^VIX"]:
         try:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
                 if title: news += f"- {title}\n"
         except: continue
     
-    prompt = custom_prompt if custom_prompt else f"""
-    ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news}
-    בנה דוח בנקודות:
-    ## דוח ניתוח שוק - תמונת מצב אסטרטגית
-    ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
-    ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
-    ### 🌡️ 3. 'סנטימנט השוק': שורה תחתונה לסוחר
-    """
+    prompt = custom_prompt if custom_prompt else f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nמבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח החדשות."
+    except: return "⚠️ שגיאת AI בניתוח."
 
-# --- סריקה משולבת (STOCKS & ETF) ---
+# --- 4. סריקת פריצות (Execution) ---
 def run_execution_scan(service):
     results = {"STOCKS": [], "ETF": []}
     log = ""
-    # השמות עם הקו התחתון כפי שהם בדרייב
     mapping = {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}
     
     for prefix, label in mapping.items():
         df, status = download_latest_file(service, prefix)
-        log += f"{status}\n"
+        log += f"{prefix}: {status}\n"
         if df is not None and 'Ticker' in df.columns:
             for _, row in df.iterrows():
                 t, s = str(row['Ticker']).strip(), row.get('Score', 0)
@@ -123,14 +130,14 @@ def run_execution_scan(service):
                         results[label].append(f"{t}({s})")
                 except: continue
 
-    report = f"🎯 *WTC Execution Scan*\n{log}\n"
-    report += f"🥇 *STOCKS Gold:* {', '.join(results['STOCKS']) or 'None'}\n"
-    report += f"🏅 *ETF Gold:* {', '.join(results['ETF']) or 'None'}\n\n"
+    res_msg = f"🎯 *WTC Execution Scan Result:*\n{log}\n"
+    res_msg += f"🥇 *STOCKS Gold:* {', '.join(results['STOCKS']) or 'None'}\n"
+    res_msg += f"🏅 *ETF Gold:* {', '.join(results['ETF']) or 'None'}\n\n"
     
     if not results["STOCKS"] and not results["ETF"]:
-        vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-        report += "💡 *סטטוס:* השוק בלחץ מכירות; אף נכס (כולל ה-ETF) לא הצליח לפרוץ את גבוה הבוקר." if vix > 22 else "💡 *סטטוס:* חוסר מומנטום כללי בפריצות."
-    return report
+        v_val = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
+        res_msg += "💡 *סטטוס:* השוק בלחץ; המניות וה-ETF נסחרים מתחת לגבוה היומי." if v_val > 22 else "💡 *סטטוס:* חוסר מומנטום בפריצות."
+    return res_msg
 
 # --- MAIN ---
 def main():
@@ -138,8 +145,11 @@ def main():
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     hour, is_manual = now.hour, os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     
+    # שלב הדינמיות: בניית רשימת המעקב מהקבצים
+    dynamic_watchlist = build_dynamic_watchlist(service)
+    
     db = get_market_dashboard()
-    portfolio = get_portfolio_snapshot()
+    portfolio = get_portfolio_snapshot(dynamic_watchlist)
 
     if is_manual:
         send_telegram_msg(f"{db}{portfolio}")
