@@ -1,5 +1,6 @@
 import os
 import datetime
+import time
 import pandas as pd
 import yfinance as yf
 import requests
@@ -17,8 +18,18 @@ GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 def send_telegram_msg(text):
     if not text: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    
+    # ניסיון ראשון עם עיצוב Markdown
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    response = requests.post(url, json=payload)
+    
+    # אם נכשל (למשל בגלל תווים מיוחדים של ה-AI), שולח כטקסט פשוט
+    if response.status_code != 200:
+        print(f"Markdown failed, sending plain text. Error: {response.text}")
+        payload = {"chat_id": CHAT_ID, "text": text}
+        requests.post(url, json=payload)
+    
+    time.sleep(1) # המתנה קצרה למניעת חסימה
 
 # --- דאשבורד נתונים חיים ---
 def get_market_dashboard():
@@ -75,11 +86,11 @@ def download_latest_csv(service, folder_name, file_prefix):
         return pd.read_csv(fh)
     except: return None
 
-# --- דו"ח אנליסט בכיר מורחב ---
+# --- דו"ח אנליסט בכיר (הלוגיקה המקורית) ---
 def get_institutional_context():
     context_data = ""
-    # איסוף חדשות מעמיק יותר
-    for t in ["^GSPC", "^IXIC", "VIX", "GC=F", "CL=F"]: # כולל זהב ונפט להקשר מאקרו
+    # שימוש בטיקרים הנכונים
+    for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]: 
         try:
             news = yf.Ticker(t).news
             if news:
@@ -88,18 +99,16 @@ def get_institutional_context():
                     if title: context_data += f"- {title}\n"
         except: continue
     
-    # הפרומפט המקצועי שביקשת
     prompt = f"""
     אתה אנליסט מוסדי בכיר בוול סטריט (בסגנון Goldman Sachs ו-Fundstrat). 
-    נתח את כותרות החדשות הבאות מהדקות האחרונות בבורסה:
-    {context_data if context_data else 'אין חדשות חריגות כרגע, נתח לפי המצב הכללי ב-2026.'}
+    נתח את כותרות החדשות הבאות:
+    {context_data if context_data else 'אין חדשות חריגות כרגע.'}
     
-    בנה דו"ח מקצועי, חד ומסודר בנקודות (Bullet Points) הכולל:
-    1. 🏛️ 'הכסף הגדול': מה המוסדיים והשחקנים הגדולים (כמו טום לי) מתכננים או חושבים היום?
-    2. 💣 'מוקשים ומאקרו': האם יש הודעות פד, נתוני אינפלציה, ריבית או אירועים גיאופוליטיים שצריך להיזהר מהם?
-    3. 🌡️ 'סנטימנט השוק': האם אנחנו ב-Risk-On או Risk-Off? מה השורה התחתונה לסוחר בתוך היום?
-    
-    תכתוב בעברית קולחת ומקצועית של סוחרים.
+    בנה דו"ח מקצועי ומסודר בנקודות (Bullet Points) הכולל:
+    1. 🏛️ 'הכסף הגדול': מה המוסדיים חושבים היום?
+    2. 💣 'מוקשים ומאקרו': האם יש אירועי מאקרו שצריך להיזהר מהם?
+    3. 🌡️ 'סנטימנט השוק': האם אנחנו ב-Risk-On או Risk-Off?
+    תכתוב בעברית מקצועית.
     """
     return get_ai_response(prompt)
 
@@ -129,8 +138,14 @@ def main():
     db = get_market_dashboard()
 
     if is_manual:
+        # הודעה 1: דאשבורד + פתיחה
         send_telegram_msg(f"{db}🛡️ *WTC Sentinel 2026 - Status Check*")
-        send_telegram_msg(f"🏛️ *Senior Analyst Report:*\n\n{get_institutional_context()}")
+        
+        # הודעה 2: דו"ח האנליסט (החלק שנעלם)
+        ai_report = get_institutional_context()
+        send_telegram_msg(f"🏛️ *Senior Analyst Report:*\n\n{ai_report}")
+        
+        # הודעה 3: סריקת ביצוע
         send_telegram_msg(f"🎯 *Execution Scan:*\n{run_execution_scan()}")
         return
 
