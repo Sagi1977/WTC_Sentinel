@@ -45,54 +45,63 @@ def download_latest_file(service, prefix):
         return df, "Success"
     except: return None, "Error"
 
-# --- 1. בניית רשימת נכסי המפתח (Dynamic Watchlist) ---
+# --- 1. בניית רשימת נכסי המפתח מה-CSV (דינמי) ---
 def build_dynamic_watchlist(service):
     watchlist = {}
     prefixes = ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]
     for prefix in prefixes:
         df, _ = download_latest_file(service, prefix)
         if df is not None:
-            # איתור העמודה הנכונה
             target_col = next((c for c in df.columns if 'Final' in c), None)
             if target_col:
-                # סינון לפי מילות המפתח שהגדרת ב-CSV
+                # מחפש מניות שסומנו כ-Anchor, Turbo או Top 5 ETF
                 filtered = df[df[target_col].str.contains('Anchor|Turbo|Top 5', na=False, case=False)]
                 for _, row in filtered.iterrows():
                     ticker = str(row['Ticker']).strip()
                     watchlist[ticker] = {
-                        "type": str(row[target_col]).split('(')[0].strip(), # ניקוי השם
+                        "type": str(row[target_col]).split('(')[0].strip(),
                         "score": row.get('Score', 0)
                     }
     return watchlist
 
-# --- 2. דאשבורד ופורטפוליו ---
-def get_market_dashboard():
-    try:
-        spy = yf.Ticker("SPY").history(period="2d")
-        vix = yf.Ticker("^VIX").history(period="1d")
-        v_p, s_p = vix['Close'].iloc[-1], spy['Close'].iloc[-1]
-        s_c = ((spy['Close'].iloc[-1] / spy['Close'].iloc[-2]) - 1) * 100
-        status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
-        emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
-        return f"📊 *WTC Sentinel Dashboard*\n`--------------------------`\n🚦 *Status:* `{status}` {emoji}\n📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
-    except: return "⚠️ Dashboard Offline\n\n"
-
-def get_portfolio_snapshot(watchlist):
+# --- 2. לוגיקת ביצועי הפורטפוליו (יומי ושבועי) ---
+def get_portfolio_performance(watchlist):
     if not watchlist: return "⚠️ לא נמצאו נכסי מפתח בקבצים.\n"
-    report = "📈 *My Portfolio Watch (Dynamic)*\n"
-    report += "`Type       | Ticker | Price | Chg% | Status`\n"
+    
+    now_isr = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    # חישוב יום שני האחרון בשעה 17:00 (ישראל)
+    days_to_monday = now_isr.weekday()
+    monday_start = (now_isr - datetime.timedelta(days=days_to_monday)).replace(hour=17, minute=0, second=0, microsecond=0)
+    
+    report = "📈 *WTC Portfolio Watch (Dynamic)*\n"
+    report += "`Ticker | Price | Day% | Wk%  | Status`\n"
+    report += "`---------------------------------------`\n"
+    
     for t, info in watchlist.items():
         try:
-            s = yf.Ticker(t)
-            h = s.history(period="2d")
-            d5 = s.history(period="1d", interval="5m")
-            curr = h['Close'].iloc[-1]
-            p_chg = ((curr / h['Close'].iloc[-2]) - 1) * 100
-            oh = d5.iloc[:6]['High'].max()
-            stat = "✅ Break" if curr > oh else "❌ Below"
-            report += f"`{info['type'][:10]:<10} | {t:<5} | {curr:>6.2f} | {p_chg:>+5.1f}% | {stat:<7}`\n"
+            # הורדת נתונים מיום שני האחרון
+            data = yf.download(t, start=(monday_start - datetime.timedelta(days=1)).strftime('%Y-%m-%d'), interval="15m", progress=False)
+            if data.empty: continue
+            
+            curr_p = data['Close'].iloc[-1]
+            
+            # שינוי מהפתיחה של היום (16:30)
+            today_data = data[data.index.date == now_isr.date()]
+            day_open = today_data['Open'].iloc[0] if not today_data.empty else curr_p
+            day_chg = ((curr_p / day_open) - 1) * 100
+            
+            # שינוי משני ב-17:00
+            monday_data = data[data.index >= monday_start.strftime('%Y-%m-%d %H:%M:%S')]
+            week_open = monday_data['Open'].iloc[0] if not monday_data.empty else day_open
+            week_chg = ((curr_p / week_open) - 1) * 100
+            
+            # פריצה מעל גבוה הבוקר (30 דקות ראשונות)
+            opening_high = today_data.iloc[:2]['High'].max() if len(today_data) >= 2 else curr_p
+            status = "✅ Brk" if curr_p > opening_high else "❌ Bel"
+            
+            report += f"`{t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {week_chg:>+5.1f}% | {status}`\n"
         except: continue
-    return report + "\n"
+    return report + "`---------------------------------------`\n"
 
 # --- 3. ניתוח AI מוסדי ---
 def get_ai_report(custom_prompt=None):
@@ -104,22 +113,27 @@ def get_ai_report(custom_prompt=None):
                 if title: news += f"- {title}\n"
         except: continue
     
-    prompt = custom_prompt if custom_prompt else f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nמבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+    prompt = custom_prompt if custom_prompt else f"""
+    ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news}
+    בנה דוח בנקודות:
+    ## דוח ניתוח שוק - תמונת מצב אסטרטגית
+    ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
+    ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
+    ### 🌡️ 3. 'סנטימנט השוק': שורה תחתונה לסוחר
+    """
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
     except: return "⚠️ שגיאת AI בניתוח."
 
-# --- 4. סריקת פריצות (Execution) ---
+# --- 4. סריקת פריצות (Execution Scan) ---
 def run_execution_scan(service):
     results = {"STOCKS": [], "ETF": []}
-    log = ""
     mapping = {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}
     
     for prefix, label in mapping.items():
-        df, status = download_latest_file(service, prefix)
-        log += f"{prefix}: {status}\n"
+        df, _ = download_latest_file(service, prefix)
         if df is not None and 'Ticker' in df.columns:
             for _, row in df.iterrows():
                 t, s = str(row['Ticker']).strip(), row.get('Score', 0)
@@ -130,14 +144,22 @@ def run_execution_scan(service):
                         results[label].append(f"{t}({s})")
                 except: continue
 
-    res_msg = f"🎯 *WTC Execution Scan Result:*\n{log}\n"
-    res_msg += f"🥇 *STOCKS Gold:* {', '.join(results['STOCKS']) or 'None'}\n"
-    res_msg += f"🏅 *ETF Gold:* {', '.join(results['ETF']) or 'None'}\n\n"
-    
-    if not results["STOCKS"] and not results["ETF"]:
-        v_val = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-        res_msg += "💡 *סטטוס:* השוק בלחץ; המניות וה-ETF נסחרים מתחת לגבוה היומי." if v_val > 22 else "💡 *סטטוס:* חוסר מומנטום בפריצות."
-    return res_msg
+    report = f"🎯 *WTC Execution Scan Result:*\n"
+    report += f"🥇 *STOCKS Gold:* {', '.join(results['STOCKS']) or 'None'}\n"
+    report += f"🏅 *ETF Gold:* {', '.join(results['ETF']) or 'None'}\n\n"
+    return report
+
+# --- 5. דאשבורד שוק ---
+def get_market_dashboard():
+    try:
+        spy = yf.Ticker("SPY").history(period="2d")
+        vix = yf.Ticker("^VIX").history(period="1d")
+        v_p, s_p = vix['Close'].iloc[-1], spy['Close'].iloc[-1]
+        s_c = ((spy['Close'].iloc[-1] / spy['Close'].iloc[-2]) - 1) * 100
+        status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
+        emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
+        return f"📊 *WTC Sentinel Dashboard*\n`--------------------------`\n🚦 Status: `{status}` {emoji} | 📉 VIX: `{v_p:.2f}`\n📈 SPY: `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
+    except: return "⚠️ Dashboard Offline\n\n"
 
 # --- MAIN ---
 def main():
@@ -145,25 +167,23 @@ def main():
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     hour, is_manual = now.hour, os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     
-    # שלב הדינמיות: בניית רשימת המעקב מהקבצים
-    dynamic_watchlist = build_dynamic_watchlist(service)
-    
+    watchlist = build_dynamic_watchlist(service)
     db = get_market_dashboard()
-    portfolio = get_portfolio_snapshot(dynamic_watchlist)
+    performance = get_portfolio_performance(watchlist)
 
     if is_manual:
-        send_telegram_msg(f"{db}{portfolio}")
+        send_telegram_msg(f"{db}{performance}")
         send_telegram_msg(get_ai_report())
         send_telegram_msg(run_execution_scan(service))
         return
 
-    if hour == 16:
+    if hour == 16: # פתיחה
         send_telegram_msg(f"{db}\n{get_ai_report()}")
-    elif 17 <= hour < 23:
-        send_telegram_msg(f"{db}{portfolio}\n{run_execution_scan(service)}")
-    elif hour == 23:
-        closing = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי. התייחס למדדים ולסגירה."
-        send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing)}")
+    elif 17 <= hour < 23: # זמן מסחר
+        send_telegram_msg(f"{db}{performance}\n{run_execution_scan(service)}")
+    elif hour == 23: # נעילה
+        closing_msg = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי. התייחס למדדים, תנודתיות ואיך השוק נסגר."
+        send_telegram_msg(f"{db}🌙 *WTC Closing Summary*\n\n{get_ai_report(closing_msg)}")
 
 if __name__ == "__main__":
     main()
