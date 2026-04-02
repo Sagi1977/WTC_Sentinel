@@ -20,13 +20,20 @@ def send_telegram_msg(text):
 
 def get_ai_summary():
     try:
+        # בגרסת 2026, ה-Client של google-genai יודע לנהל את הגרסאות לבד
         client = genai.Client(api_key=GEMINI_KEY)
+        
+        # שימוש במודל 1.5-flash שהוא הכי מהיר ויציב לשימוש חופשי
         response = client.models.generate_content(
-            model="gemini-1.5-flash", # המודל העדכני ל-2026
-            contents="תן משפט מוטיבציה קצר לסוחר מניות בעברית"
+            model='gemini-1.5-flash', 
+            contents='תן משפט מוטיבציה קצר לסוחר מניות בעברית'
         )
+        
+        # בגרסה החדשה, הטקסט נמצא תחת response.text
         return response.text
     except Exception as e:
+        # אם יש שגיאה, נדפיס אותה ללוג כדי שנבין מה קרה
+        print(f"AI Error detail: {str(e)}")
         return f"שגיאת AI: {str(e)}"
 
 def main():
