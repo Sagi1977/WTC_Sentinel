@@ -40,14 +40,14 @@ def download_latest_file(service, prefix):
         fh = io.BytesIO()
         MediaIoBaseDownload(fh, req).next_chunk()
         fh.seek(0)
-        # שימוש ב-utf-8-sig כדי לקרוא נכון עברית ואמוג'ים מה-CSV
+        # שימוש ב-utf-8-sig לטיפול באמוג'ים ועברית מה-CSV
         df = pd.read_csv(fh, encoding='utf-8-sig', engine='python')
-        df.columns = [c.strip() for c in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
         return df, f"✅ {prefix} Loaded"
     except Exception as e:
         return None, f"❌ Err: {str(e)[:40]}"
 
-# --- 1. בניית רשימת מעקב דינמית (Anchor, Turbo, ETF) ---
+# --- 1. בניית רשימת מעקב דינמית (Anchor, Turbo, Top 5 ETF) ---
 def build_dynamic_watchlist(service):
     watchlist = {}
     logs = []
@@ -55,16 +55,16 @@ def build_dynamic_watchlist(service):
         df, status = download_latest_file(service, prefix)
         logs.append(status)
         if df is not None:
-            # איתור עמודה המכילה 'Final' או 'Selection'
+            # איתור עמודה המכילה 'Final' או 'Selection' (גמיש לשמות כמו Final_Selection)
             target_col = next((c for c in df.columns if 'Final' in c or 'Selection' in c), None)
             ticker_col = next((c for c in df.columns if 'Ticker' in c), 'Ticker')
             
             if target_col:
-                # חיפוש גמיש של המילים Anchor, Turbo, Top 5
-                mask = df[target_col].str.contains('Anchor|Turbo|Top 5', na=False, case=False)
+                # חיפוש המילים שאתה משתמש בהן ב-CSV (מתעלם מאמוג'ים ורווחים)
+                mask = df[target_col].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
                 filtered = df[mask]
                 for _, row in filtered.iterrows():
-                    ticker = str(row[ticker_col]).strip()
+                    ticker = str(row[ticker_col]).strip().upper()
                     watchlist[ticker] = {
                         "type": str(row[target_col]).replace('⚓', '').replace('🚀', '').replace('🛡️', '').strip()[:10],
                         "score": row.get('Score', 0)
@@ -81,7 +81,7 @@ def get_portfolio_performance(watchlist):
     # זמן ישראל (UTC+3)
     now_isr = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     
-    # חישוב יום שני האחרון ב-17:00 (זמן פתיחת הגולדן)
+    # חישוב יום שני האחרון בשעה 17:00 (זמן ה"קנייה" ותחילת הגולדן)
     days_to_monday = now_isr.weekday()
     monday_start = (now_isr - datetime.timedelta(days=days_to_monday)).replace(hour=17, minute=0, second=0, microsecond=0)
     
@@ -91,7 +91,7 @@ def get_portfolio_performance(watchlist):
     
     for t, info in watchlist.items():
         try:
-            # נתונים מיום שני האחרון בגרף של 15 דקות
+            # הורדת נתונים מפורטת מיום שני (15m intervals)
             data = yf.download(t, start=(monday_start - datetime.timedelta(days=2)).strftime('%Y-%m-%d'), interval="15m", progress=False)
             if data.empty: continue
             
@@ -103,11 +103,12 @@ def get_portfolio_performance(watchlist):
             day_chg = ((curr_p / day_open) - 1) * 100
             
             # ב. Wk_Chg%: שינוי מיום שני ב-17:00 (זמן הקנייה)
-            monday_data = data[data.index >= monday_start.strftime('%Y-%m-%d %H:%M:%S')]
+            monday_ts = pd.Timestamp(monday_start).tz_localize(data.index.tz)
+            monday_data = data[data.index >= monday_ts]
             week_open = monday_data['Open'].iloc[0] if not monday_data.empty else day_open
             week_chg = ((curr_p / week_open) - 1) * 100
             
-            # ג. Status: פריצה של גבוה הבוקר (30 דקות ראשונות)
+            # ג. Status: פריצה של גבוה הבוקר (Opening Range - 30 דקות ראשונות)
             opening_high = today_data.iloc[:2]['High'].max() if len(today_data) >= 2 else curr_p
             status = "✅ Brk" if curr_p >= opening_high else "❌ Bel"
             
@@ -130,35 +131,35 @@ def get_ai_report(custom_prompt=None):
     ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news}
     בנה דוח בנקודות:
     ## דוח אסטרטגי - תמונת מצב מוסדית
-    ### 🏛️ 1. הכסף הגדול: מוסדיים ואסטרטגיה
-    ### 💣 2. מוקשים ומאקרו: סיכונים וגיאופוליטיקה
-    ### 🌡️ 3. סנטימנט השוק: שורה תחתונה לסוחר
+    ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
+    ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
+    ### 🌡️ 3. 'סנטימנט השוק': שורה תחתונה לסוחר
     """
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
     except Exception as e:
-        return f"⚠️ שגיאת AI טכנית: {str(e)[:50]}"
+        return f"⚠️ שגיאת AI: {str(e)[:50]}"
 
-# --- 4. סריקת פריצות (Execution) וסיכום טכני ---
+# --- 4. סריקת פריצות וסיכום טכני ---
 def run_execution_scan(service):
     res = {"STOCKS": [], "ETF": []}
     for pref, label in {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}.items():
         df, _ = download_latest_file(service, pref)
         if df is not None:
+            ticker_col = next((c for c in df.columns if 'Ticker' in c), 'Ticker')
             for _, row in df.iterrows():
-                t, s = str(row.get('Ticker', '')).strip(), row.get('Score', 0)
+                t, s = str(row.get(ticker_col, '')).strip(), row.get('Score', 0)
                 try:
                     d = yf.download(t, period="1d", interval="5m", progress=False)
                     if len(d) >= 7 and d['Close'].iloc[-1] > d.iloc[:6]['High'].max():
                         res[label].append(f"{t}({s})")
                 except: continue
 
-    report = f"🎯 *Execution Scan Result:*\n🥇 STOCKS Gold: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF Gold: {', '.join(res['ETF']) or 'None'}\n\n"
+    report = f"🎯 *WTC Execution Scan Result:*\n🥇 STOCKS Gold: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF Gold: {', '.join(res['ETF']) or 'None'}\n\n"
     vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
     
-    # משפט הסיכום הטכני המשולב
     if not res["STOCKS"] and not res["ETF"]:
         if vix > 22:
             report += "💡 *סיכום טכני:* השוק בלחץ מכירות ותנודתיות גבוהה; המניות נסחרות מתחת לגבוה היומי - מומלץ להמתין להרגעה ב-VIX."
@@ -182,7 +183,7 @@ def main():
     s_p = spy['Close'].iloc[-1]
     s_c = ((s_p / spy['Close'].iloc[-2]) - 1) * 100
     
-    header = f"📊 *WTC Sentinel Dashboard*\n🚦 Status: `{'BEARISH' if vix > 25 else 'CAUTION'}` | VIX: `{vix:.2f}`\nSPY: `{s_p:.2f} ({s_c:+.2f}%)`\n\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
+    header = f"📊 *WTC Sentinel Dashboard*\n`--------------------------`\n🚦 Status: `{'BEARISH' if vix > 25 else 'CAUTION'}` | VIX: `{vix:.2f}`\nSPY: `{s_p:.2f} ({s_c:+.2f}%)`\n\n🔍 *Diagnostics:*\n`{drive_logs}`\n`--------------------------`\n"
     perf = get_portfolio_performance(watchlist)
 
     if is_manual:
@@ -191,11 +192,11 @@ def main():
         send_telegram_msg(run_execution_scan(service))
         return
 
-    if hour == 16: # 16:00 - דוח מקדים
+    if hour == 16: # 16:00 דוח מקדים
         send_telegram_msg(f"{header}\n{get_ai_report()}")
     elif 17 <= hour < 23: # זמן מסחר פעיל
         send_telegram_msg(f"{header}\n{perf}\n{run_execution_scan(service)}")
-    elif hour == 23: # נעילה
+    elif hour == 23: # נעילת מסחר
         send_telegram_msg(f"{header}🌙 *WTC Closing Summary*\n\n{get_ai_report('סכם בעברית את יום המסחר ואיך השוק נסגר.')}")
 
 if __name__ == "__main__":
