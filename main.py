@@ -31,20 +31,12 @@ def get_drive_service():
 
 def download_latest_file(service, prefix):
     try:
-        # חיפוש גלובלי של הקובץ הכי חדש שמכיל את השם (ללא תלות בתיקייה)
         query = f"name contains '{prefix}' and mimeType = 'text/csv'"
         res = service.files().list(q=query, orderBy="createdTime desc", fields="files(id, name)").execute()
         files = res.get('files', [])
-        
-        if not files:
-            # ניסיון נוסף ללא פילטר mimeType (למקרה שגוגל מזהה את ה-CSV אחרת)
-            res = service.files().list(q=f"name contains '{prefix}'", orderBy="createdTime desc").execute()
-            files = res.get('files', [])
-            if not files: return None, f"קובץ {prefix} לא נמצא"
+        if not files: return None, f"קובץ {prefix} לא נמצא"
 
         file_id = files[0]['id']
-        file_name = files[0]['name']
-        
         req = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, req)
@@ -55,11 +47,11 @@ def download_latest_file(service, prefix):
         fh.seek(0)
         df = pd.read_csv(fh)
         df.columns = [c.strip().capitalize() for c in df.columns]
-        return df, f"✅ נטען: {file_name}"
+        return df, "success"
     except Exception as e:
-        return None, f"❌ שגיאה: {str(e)}"
+        return None, str(e)
 
-# --- דאשבורד וניתוח ---
+# --- דאשבורד וניתוח AI ---
 def get_market_dashboard():
     try:
         spy = yf.Ticker("SPY").history(period="2d")
@@ -73,7 +65,7 @@ def get_market_dashboard():
 
 def get_institutional_report():
     news_text = ""
-    for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]:
+    for t in ["^GSPC", "^VIX", "GC=F"]:
         try:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
@@ -83,7 +75,7 @@ def get_institutional_report():
     prompt = f"""
     ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news_text}
     בנה דוח בנקודות:
-    ## דוח ניתוח שוק - תמונת מצב אסטרטגית
+    ## דוח אסטרטגי - תמונת מצב מוסדית
     ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
     ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
     ### 🌡️ 3. 'סנטימנט השוק': שורה תחתונה לסוחר
@@ -92,24 +84,23 @@ def get_institutional_report():
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח החדשות."
+    except: return "⚠️ שגיאת AI בניתוח המוסדי."
 
-# --- סריקת פריצות (Execution) ---
+# --- סריקת פריצות עם משפט הסבר ---
 def run_execution_scan(service):
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         return "🛑 *Market Closed.*"
     
     results = {"Gold": [], "Underdogs": []}
-    debug_log = ""
+    files_found = []
     
-    # שימוש בשמות האמיתיים שמופיעים בדרייב שלך
     for prefix in ["GoldenPlanSTOCKS", "GoldenPlanETF"]:
         df, status = download_latest_file(service, prefix)
-        debug_log += f"{status}\n"
-        
-        if df is not None and 'Ticker' in df.columns:
+        if df is not None:
+            files_found.append(prefix)
             for _, row in df.iterrows():
+                if 'Ticker' not in df.columns: continue
                 ticker = str(row['Ticker']).strip()
                 score = row.get('Score', 0)
                 try:
@@ -122,9 +113,21 @@ def run_execution_scan(service):
                         elif score < 60: results["Underdogs"].append(ticker)
                 except: continue
 
-    report = f"🎯 *Execution Scan Result:*\n{debug_log}\n"
+    # בניית משפט הסטטוס (ההסבר שביקשת)
+    if not results["Gold"] and not results["Underdogs"]:
+        vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
+        if vix > 22:
+            status_summary = "💡 *סיכום סריקה:* השוק בלחץ מכירות ותנודתיות גבוהה; אף נכס לא הצליח להחזיק מעמד מעל גבוה הבוקר - מומלץ להמתין להרגעה."
+        else:
+            status_summary = "💡 *סיכום סריקה:* השוק בדשדוש; לא זוהו פריצות מומנטום מעל ה-Opening High ברשימות המעקב."
+    else:
+        status_summary = f"🚀 *סיכום סריקה:* זוהו פריצות מומנטום ב-{len(results['Gold']) + len(results['Underdogs'])} נכסים."
+
+    report = f"🎯 *WTC Execution Scan*\n"
+    report += f"📂 קבצים שנסרקו: {', '.join(files_found) if files_found else 'אף קובץ'}\n\n"
     report += f"🥇 *Gold:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
-    report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}"
+    report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}\n\n"
+    report += status_summary
     return report
 
 # --- MAIN ---
@@ -135,7 +138,7 @@ def main():
     db = get_market_dashboard()
 
     if is_manual:
-        send_telegram_msg(f"{db}🛡️ *WTC Sentinel - Manual Execution*")
+        send_telegram_msg(f"{db}🛡️ *Manual Mode Run*")
         send_telegram_msg(get_institutional_report())
         send_telegram_msg(run_execution_scan(service))
         return
