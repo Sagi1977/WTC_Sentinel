@@ -24,7 +24,7 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
     time.sleep(1.2)
 
-# --- גוגל דרייב - טעינה אגרסיבית ---
+# --- גוגל דרייב ---
 def get_drive_service():
     creds, _ = google.auth.default()
     return build('drive', 'v3', credentials=creds)
@@ -40,79 +40,86 @@ def download_latest_file(service, prefix):
         fh = io.BytesIO()
         MediaIoBaseDownload(fh, req).next_chunk()
         fh.seek(0)
-        # שימוש בקידוד הכי רחב שיש כדי שלא יתעלם מהאמוג'ים שלך
-        df = pd.read_csv(fh, encoding='utf-8-sig', engine='python', on_bad_lines='skip')
+        # טעינה עם utf-8-sig לטיפול באמוג'ים
+        df = pd.read_csv(fh, encoding='utf-8-sig', engine='python')
         df.columns = [str(c).strip() for c in df.columns]
         return df, "Loaded"
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
-# --- 1. בניית רשימה (חיפוש עיוור בתוך הקובץ) ---
+# --- 1. בניית רשימת מעקב (זיהוי אגרסיבי וחסין) ---
 def build_dynamic_watchlist(service):
     watchlist = {}
     logs = []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is not None:
-            # מוצא את עמודת ה-Ticker ועמודת ה-Selection לא משנה איך קראת להן
-            t_col = next((c for c in df.columns if 'Ticker' in c), 'Ticker')
-            s_col = next((c for c in df.columns if 'Selection' in c or 'Final' in c), None)
+            # מציאת עמודת ה-Selection (גמיש ל-Final_Selection, Selection וכו')
+            sel_col = next((c for c in df.columns if 'final' in c.lower() or 'selection' in c.lower()), None)
+            ticker_col = next((c for c in df.columns if 'ticker' in c.lower()), 'Ticker')
             
-            if s_col:
-                # הוא מחפש את המילים בתוך התא, לא משנה מה יש מסביב
-                mask = df[s_col].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
+            if sel_col:
+                # ניקוי הטקסט בעמודה לצורך חיפוש נקי
+                df['clean_sel'] = df[sel_col].astype(str).str.replace(r'[^\w\s]', '', regex=True).str.lower()
+                # חיפוש המילים שלך
+                mask = df['clean_sel'].str.contains('anchor|turbo|top 5', na=False)
                 filtered = df[mask]
                 for _, row in filtered.iterrows():
-                    ticker = str(row[t_col]).strip().upper()
-                    watchlist[ticker] = row[s_col]
-                logs.append(f"✅ {prefix}: מצאתי {len(filtered)} נכסים")
+                    t = str(row[ticker_col]).strip().upper()
+                    watchlist[t] = str(row[sel_col])
+                logs.append(f"✅ {prefix}: Found {len(filtered)} items")
             else:
-                logs.append(f"⚠️ {prefix}: לא נמצאה עמודת בחירה!")
+                logs.append(f"⚠️ {prefix}: Selection column not found!")
         else:
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# --- 2. חישוב ביצועים (הדיוק שביקשת) ---
+# --- 2. ביצועי פורטפוליו (Day% מ-16:30 / Wk% מיום שני 17:00) ---
 def get_portfolio_performance(watchlist):
-    if not watchlist: return "⚠️ הטבלה ריקה - וודא שהמילים Anchor/Turbo מופיעות ב-CSV.\n"
+    if not watchlist: return "⚠️ Watchlist is empty. Check CSV content.\n"
     
+    # זמן ישראל (IDT - UTC+3 באפריל 2026)
     now_isr = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    days_to_monday = now_isr.weekday() # 0=Mon, 3=Thu
+    days_to_monday = now_isr.weekday()
     monday_date = (now_isr - datetime.timedelta(days=days_to_monday)).date()
     
-    report = "📈 *WTC Portfolio Performance*\n"
+    report = "📈 *WTC Portfolio Watch (Dynamic)*\n"
     report += "`Ticker | Price | Day% | Wk%  | Status`\n"
     report += "`---------------------------------------`\n"
     
     for t in watchlist.keys():
         try:
-            # מביא נתונים מתחילת השבוע בנרות של שעה (יותר יציב לחישוב שבועי)
-            data = yf.download(t, start=monday_date.strftime('%Y-%m-%d'), interval="1h", progress=False)
+            # הורדת נתונים מפורטת (15 דקות לדיוק זמנים)
+            data = yf.download(t, start=monday_date.strftime('%Y-%m-%d'), interval="15m", progress=False)
             if data.empty: continue
             
             curr_p = data['Close'].iloc[-1]
             
-            # Wk% - מהפתיחה הראשונה של השבוע (יום שני)
-            week_open = data['Open'].iloc[0]
-            wk_chg = ((curr_p / week_open) - 1) * 100
-            
-            # Day% - מהפתיחה של היום (16:30)
+            # א. Day% - שינוי מהפתיחה של היום (16:30 ישראל = 13:30 UTC)
             today_data = data[data.index.date == now_isr.date()]
-            day_open = today_data['Open'].iloc[0] if not today_data.empty else week_open
+            day_open = today_data['Open'].iloc[0] if not today_data.empty else curr_p
             day_chg = ((curr_p / day_open) - 1) * 100
             
-            # Status - בדיקת פריצה יומית
-            # מוריד נתונים מהירים רק לצורך הסטטוס
-            d5 = yf.download(t, period="1d", interval="5m", progress=False)
-            o_high = d5.iloc[:6]['High'].max() if len(d5) >= 6 else curr_p
-            status = "✅ Brk" if curr_p >= o_high else "❌ Bel"
+            # ב. Wk% - שינוי מיום שני ב-17:00 (17:00 ישראל = 14:00 UTC)
+            monday_data = data[data.index.date == monday_date]
+            # מחפשים את הנר של 14:00 UTC (17:00 ישראל)
+            try:
+                week_start_price = monday_data[monday_data.index.hour >= 14]['Open'].iloc[0]
+            except:
+                week_start_price = data['Open'].iloc[0] # גיבוי לפתיחת השבוע
             
-            report += f"`{t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            week_chg = ((curr_p / week_start_price) - 1) * 100
+            
+            # ג. Status - פריצת גבוה הבוקר (30 דקות ראשונות)
+            opening_high = today_data.iloc[:2]['High'].max() if len(today_data) >= 2 else curr_p
+            status = "✅ Brk" if curr_p >= opening_high else "❌ Bel"
+            
+            report += f"`{t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {week_chg:>+5.1f}% | {status}`\n"
         except: continue
         
     return report + "`---------------------------------------`\n"
 
-# --- 3. AI וסיכום טכני ---
+# --- 3. ניתוח AI גולדמן סאקס ---
 def get_ai_report(custom_prompt=None):
     try:
         news = ""
@@ -128,12 +135,13 @@ def get_ai_report(custom_prompt=None):
     except Exception as e:
         return f"⚠️ שגיאת AI: {str(e)[:40]}"
 
+# --- 4. סריקה וסיכום טכני ---
 def run_execution_scan(service):
     res = {"STOCKS": [], "ETF": []}
     for pref, label in {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}.items():
         df, _ = download_latest_file(service, pref)
         if df is not None:
-            t_col = next((c for c in df.columns if 'Ticker' in c), 'Ticker')
+            t_col = next((c for c in df.columns if 'ticker' in c.lower()), 'Ticker')
             for _, row in df.iterrows():
                 t = str(row.get(t_col, '')).strip()
                 try:
@@ -141,9 +149,10 @@ def run_execution_scan(service):
                     if len(d) >= 7 and d['Close'].iloc[-1] > d.iloc[:6]['High'].max():
                         res[label].append(t)
                 except: continue
-    
+
     vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-    report = f"🎯 *Scan Result:*\n🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
+    report = f"🎯 *Scan Result:*\n🥇 STOCKS Gold: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF Gold: {', '.join(res['ETF']) or 'None'}\n\n"
+    
     if not res["STOCKS"] and not res["ETF"]:
         report += "💡 *סיכום טכני:* אין פריצות; השוק בדשדוש. " + ("להמתין ל-VIX." if vix > 22 else "")
     else:
