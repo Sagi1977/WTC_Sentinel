@@ -1,7 +1,7 @@
 import os
 import datetime
 import requests
-import google.generativeai as genai # שים לב: זה ה-Import הנכון!
+import google.generativeai as genai
 
 # --- הגדרות ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -19,27 +19,36 @@ def send_telegram_msg(text):
 
 def get_ai_summary():
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # שלב הגילוי: בודק אילו מודלים באמת קיימים בחשבון שלך
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        print(f"DEBUG: Found models: {available_models}")
+        
+        if not available_models:
+            return "לא נמצאו מודלים זמינים בחשבון ה-API שלך. וודא שהמפתח תקין."
+            
+        # בוחר את המודל הכי מתאים (מחפש flash, ואם אין - לוקח את הראשון ברשימה)
+        selected_model = next((m for m in available_models if 'flash' in m), available_models[0])
+        print(f"DEBUG: Using model: {selected_model}")
+        
+        model = genai.GenerativeModel(selected_model)
         response = model.generate_content('תן משפט מוטיבציה קצר לסוחר מניות בעברית')
         return response.text
     except Exception as e:
-        return f"שגיאת AI: {str(e)}"
+        return f"שגיאת AI מפורטת: {str(e)}"
 
 def main():
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     
     if is_manual:
-        print("Manual run detected")
-        # בדיקת קשר מיידית
-        send_telegram_msg("✅ *המערכת מחוברת!* בודק AI כעת...")
+        print("Manual run started")
+        send_telegram_msg("🛰️ *המערכת מבצעת סריקת מודלים...*")
         
-        # שליחת תשובת ה-AI
         res = get_ai_summary()
-        send_telegram_msg(f"🤖 *בינה מלאכותית אומרת:* \n{res}")
+        send_telegram_msg(f"🤖 *הודעה מה-AI:* \n{res}")
     else:
-        # כאן תהיה הלוגיקה של השעות (16:00 וכו')
+        # לוגיקה אוטומטית (נחזיר אותה ברגע שהבדיקה תעבור)
         now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-        print(f"Current hour: {now.hour}")
+        print(f"Automatic run at hour: {now.hour}")
 
 if __name__ == "__main__":
     main()
