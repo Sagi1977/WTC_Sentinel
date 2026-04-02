@@ -18,101 +18,133 @@ GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 def send_telegram_msg(text):
     if not text: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    # שליחה בטוחה: אם המארקדאון נכשל, שולח כטקסט פשוט
-    res = requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000], "parse_mode": "Markdown"})
+    payload = {"chat_id": CHAT_ID, "text": text[:4000], "parse_mode": "Markdown"}
+    res = requests.post(url, json=payload)
     if res.status_code != 200:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
-    time.sleep(1)
+    time.sleep(1.2)
 
-# --- אבחון זהות וגישה ---
-def get_diagnostics(service):
+# --- חיבור והורדה מגוגל דרייב (מותאם לשמות שלך) ---
+def get_drive_service():
+    creds, _ = google.auth.default()
+    return build('drive', 'v3', credentials=creds)
+
+def download_csv_flexible(service, prefix):
     try:
-        # 1. מי אני?
-        creds, _ = google.auth.default()
-        email = getattr(creds, 'service_account_email', "Unknown")
+        # 1. חיפוש התיקייה (גמיש לשמות WTCSYSTEM או WTC_SYSTEM)
+        res = service.files().list(q="mimeType = 'application/vnd.google-apps.folder'").execute()
+        folders = res.get('files', [])
+        target_folder_id = None
+        for f in folders:
+            name = f['name'].replace("_", "").upper()
+            if name == "WTCSYSTEM":
+                target_folder_id = f['id']
+                break
         
-        # 2. מה אני רואה?
-        results = service.files().list(pageSize=10, fields="files(name)").execute()
-        files = [f['name'] for f in results.get('files', [])]
+        if not target_folder_id: return None, "תיקיית המערכת לא נמצאה"
         
-        diag = f"🔑 *Bot Identity:* `{email}`\n"
-        diag += f"📂 *Visible items:* {', '.join(files) if files else 'None (Access Denied)'}"
-        return diag, email
+        # 2. חיפוש הקובץ הכי חדש עם הקידומת שלך (GoldenPlan)
+        query = f"'{target_folder_id}' in parents and name contains '{prefix}'"
+        res = service.files().list(q=query, orderBy="createdTime desc").execute()
+        files = res.get('files', [])
+        if not files: return None, f"קובץ {prefix} לא נמצא"
+        
+        # 3. הורדה
+        file_id = files[0]['id']
+        req = service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        df = pd.read_csv(fh)
+        df.columns = [c.strip().capitalize() for c in df.columns]
+        return df, "success"
     except Exception as e:
-        return f"❌ Diagnostic Error: {str(e)}", "Error"
+        return None, str(e)
 
-# --- סריקת מניות (הלוגיקה המלאה) ---
-def run_full_scan(service):
-    results = {"Gold": [], "Underdogs": []}
-    log = ""
-    
-    # איתור תיקיית WTC_SYSTEM
-    folders = service.files().list(q="name = 'WTC_SYSTEM' and mimeType = 'application/vnd.google-apps.folder'").execute().get('files', [])
-    if not folders:
-        return "❌ תיקייה WTC_SYSTEM לא נמצאה בדרייב של הבוט."
-    
-    f_id = folders[0]['id']
-    for prefix in ["WTC_Intelligence_Stocks", "WTC_Intelligence_ETFs"]:
-        f_res = service.files().list(q=f"'{f_id}' in parents and name contains '{prefix}'", orderBy="createdTime desc").execute().get('files', [])
-        if f_res:
-            file_id = f_res[0]['id']
-            req = service.files().get_media(fileId=file_id)
-            fh = io.BytesIO()
-            MediaIoBaseDownload(fh, req).next_chunk()
-            fh.seek(0)
-            df = pd.read_csv(fh)
-            df.columns = [c.strip().capitalize() for c in df.columns]
-            
-            log += f"📄 נסרקו {len(df)} מניות מ-{prefix.split('_')[-1]}\n"
-            
-            for _, row in df.iterrows():
-                ticker = str(row['Ticker']).strip()
-                score = row.get('Score', 0)
-                try:
-                    data = yf.download(ticker, period="1d", interval="5m", progress=False)
-                    if len(data) < 7: continue
-                    if data['Close'].iloc[-1] > data.iloc[:6]['High'].max():
-                        if score >= 75: results["Gold"].append(ticker)
-                        elif score < 60: results["Underdogs"].append(ticker)
-                except: continue
-        else:
-            log += f"❓ קובץ {prefix} לא נמצא בתיקייה.\n"
+# --- דאשבורד וניתוח ---
+def get_market_dashboard():
+    try:
+        spy = yf.Ticker("SPY").history(period="2d")
+        vix = yf.Ticker("^VIX").history(period="1d")
+        v_p, s_p = vix['Close'].iloc[-1], spy['Close'].iloc[-1]
+        s_c = ((spy['Close'].iloc[-1] / spy['Close'].iloc[-2]) - 1) * 100
+        status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
+        emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
+        return f"📊 *WTC Dashboard*\n`--------------------------`\n🚦 *Status:* `{status}` {emoji}\n📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
+    except: return "⚠️ Dashboard Offline\n\n"
 
-    return f"🎯 *Scan Report:*\n{log}\n🥇 *Gold:* {', '.join(results['Gold']) or 'None'}\n🐕 *Underdogs:* {', '.join(results['Underdogs']) or 'None'}"
-
-# --- דאשבורד ו-AI ---
 def get_institutional_report():
     news = ""
-    for t in ["^GSPC", "^VIX", "GC=F"]:
+    for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]:
         try:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
                 if title: news += f"- {title}\n"
         except: continue
     
-    prompt = f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nמבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+    prompt = f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nבנה דוח בנקודות:\n## דוח אסטרטגי WTC\n### 🏛️ 1. 'הכסף הגדול'\n### 💣 2. 'מוקשים ומאקרו'\n### 🌡️ 3. 'סנטימנט השוק'"
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח החדשות."
+    except: return "⚠️ שגיאת AI בניתוח."
 
+# --- סריקת פריצות (Execution) ---
+def run_execution_scan(service):
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    if now.hour < 16 or (now.hour == 16 and now.minute < 30):
+        return "🛑 *הבורסה סגורה.*"
+    
+    results = {"Gold": [], "Underdogs": []}
+    log = ""
+    
+    # שימוש בקידומות האמיתיות שנמצאו בדרייב שלך
+    for prefix in ["GoldenPlanSTOCKS", "GoldenPlanETF"]:
+        df, status = download_csv_flexible(service, prefix)
+        if df is not None:
+            log += f"✅ נסרקו {len(df)} נכסים מ-{prefix}\n"
+            for _, row in df.iterrows():
+                if 'Ticker' not in df.columns: continue
+                ticker = str(row['Ticker']).strip()
+                score = row.get('Score', 0)
+                try:
+                    data = yf.download(ticker, period="1d", interval="5m", progress=False)
+                    if len(data) < 7: continue
+                    opening_high = data.iloc[:6]['High'].max()
+                    current_price = data['Close'].iloc[-1]
+                    if current_price > opening_high:
+                        if score >= 75: results["Gold"].append(ticker)
+                        elif score < 60: results["Underdogs"].append(ticker)
+                except: continue
+        else:
+            log += f"❌ {prefix}: {status}\n"
+
+    report = f"🎯 *WTC Execution Scan*\n{log}\n"
+    report += f"🥇 *Gold:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
+    report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}"
+    return report
+
+# --- MAIN ---
 def main():
-    creds, _ = google.auth.default()
-    service = build('drive', 'v3', credentials=creds)
-    
-    # בדיקת דאשבורד (VIX/SPY)
-    spy = yf.Ticker("SPY").history(period="1d")['Close'].iloc[-1]
-    vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-    dashboard = f"📊 *WTC Quick Look*\n`VIX: {vix:.2f} | SPY: {spy:.2f}`\n`--------------------------`\n"
+    service = get_drive_service()
+    is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    db = get_market_dashboard()
 
-    # הרצה
-    diag_msg, bot_email = get_diagnostics(service)
-    send_telegram_msg(f"{dashboard}{diag_msg}")
-    
-    send_telegram_msg(get_institutional_report())
-    
-    send_telegram_msg(run_full_scan(service))
+    if is_manual:
+        send_telegram_msg(f"{db}🛡️ *Manual Mode*")
+        send_telegram_msg(get_institutional_report())
+        send_telegram_msg(run_execution_scan(service))
+        return
+
+    if now.hour == 16:
+        send_telegram_msg(f"{db}\n{get_institutional_report()}")
+    elif now.hour >= 17 and now.hour < 22:
+        send_telegram_msg(f"{db}\n{run_execution_scan(service)}")
 
 if __name__ == "__main__":
     main()
