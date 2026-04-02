@@ -10,7 +10,7 @@ from google import genai
 import google.auth
 import io
 
-# --- הגדרות ליבה ---
+# --- הגדרות ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
@@ -24,7 +24,7 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
     time.sleep(1.2)
 
-# --- חיבור והורדה מגוגל דרייב ---
+# --- גוגל דרייב ---
 def get_drive_service():
     creds, _ = google.auth.default()
     return build('drive', 'v3', credentials=creds)
@@ -34,10 +34,7 @@ def download_latest_file(service, prefix):
         query = f"name contains '{prefix}' and mimeType = 'text/csv'"
         res = service.files().list(q=query, orderBy="createdTime desc", fields="files(id, name)").execute()
         files = res.get('files', [])
-        if not files:
-            res = service.files().list(q=f"name contains '{prefix}'", orderBy="createdTime desc").execute()
-            files = res.get('files', [])
-            if not files: return None, f"קובץ {prefix} לא נמצא"
+        if not files: return None, f"קובץ {prefix} לא נמצא"
 
         file_id = files[0]['id']
         req = service.files().get_media(fileId=file_id)
@@ -50,7 +47,7 @@ def download_latest_file(service, prefix):
     except Exception as e:
         return None, str(e)
 
-# --- דאשבורד וניתוח AI ---
+# --- דאשבורד וניתוח ---
 def get_market_dashboard():
     try:
         spy = yf.Ticker("SPY").history(period="2d")
@@ -64,7 +61,7 @@ def get_market_dashboard():
 
 def get_ai_report(custom_prompt=None):
     news_text = ""
-    for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]:
+    for t in ["^GSPC", "^VIX", "GC=F"]:
         try:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
@@ -72,8 +69,8 @@ def get_ai_report(custom_prompt=None):
         except: continue
     
     prompt = custom_prompt if custom_prompt else f"""
-    ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news_text}
-    בנה דוח בנקודות:
+    ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news_text}
+    מבנה הדוח:
     ## דוח ניתוח שוק - תמונת מצב אסטרטגית
     ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
     ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
@@ -83,12 +80,12 @@ def get_ai_report(custom_prompt=None):
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח החדשות."
+    except: return "⚠️ שגיאת AI בניתוח."
 
-# --- סריקת פריצות (Execution) ---
+# --- סריקת ביצוע ---
 def run_execution_scan(service):
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    if now.hour < 16 or (now.hour == 16 and now.minute < 30): return "🛑 *Market Closed.*"
+    if now.hour < 16 or (now.hour == 16 and now.minute < 30): return "🛑 *הבורסה סגורה.*"
     
     results = {"Gold": [], "Underdogs": []}
     for prefix in ["GoldenPlanSTOCKS", "GoldenPlanETF"]:
@@ -99,21 +96,20 @@ def run_execution_scan(service):
                 try:
                     data = yf.download(ticker, period="1d", interval="5m", progress=False)
                     if len(data) < 7: continue
-                    if data['Close'].iloc[-1] > data.iloc[:6]['High'].max():
+                    opening_high = data.iloc[:6]['High'].max()
+                    if data['Close'].iloc[-1] > opening_high:
                         if score >= 75: results["Gold"].append(ticker)
                         elif score < 60: results["Underdogs"].append(ticker)
                 except: continue
 
-    report = f"🎯 *WTC Execution Scan Result:*\n\n"
-    report += f"🥇 *Gold:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
-    report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}\n\n"
+    report = f"🎯 *WTC Execution Scan Result:*\n\n🥇 *Gold:* {', '.join(results['Gold']) or 'None'}\n🐕 *Underdogs:* {', '.join(results['Underdogs']) or 'None'}\n\n"
     
     if not results["Gold"] and not results["Underdogs"]:
         vix_val = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
         if vix_val > 22:
-            report += "💡 *סטטוס:* השוק בלחץ מכירות; אף נכס לא הצליח להחזיק מעמד מעל גבוה הבוקר."
+            report += "💡 *סטטוס:* השוק בלחץ מכירות; המניות ברשימה נסחרות מתחת לגבוה היומי - מומלץ להמתין להרגעה ב-VIX."
         else:
-            report += "💡 *סטטוס:* השוק בדשדוש; לא זוהו פריצות מומנטום מעל ה-Opening High."
+            report += "💡 *סטטוס:* השוק בדשדוש; לא זוהו פריצות מומנטום ברשימות המעקב."
     return report
 
 # --- MAIN ---
@@ -122,6 +118,7 @@ def main():
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     hour = now.hour
+    
     db = get_market_dashboard()
 
     if is_manual:
@@ -132,11 +129,11 @@ def main():
 
     if hour == 16:
         send_telegram_msg(f"{db}\n{get_ai_report()}")
-    elif hour >= 17 and hour < 23: # סריקות ביצוע במהלך המסחר
+    elif hour >= 17 and hour < 23:
         send_telegram_msg(f"{db}\n{run_execution_scan(service)}")
-    elif hour == 23: # דוח סיכום יום בנעילה
-        closing_prompt = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי. התייחס למדדים, תנודתיות ואיך השוק נסגר."
-        send_telegram_msg(f"{db}🌙 *WTC Closing Summary*\n\n{get_ai_report(closing_prompt)}")
+    elif hour == 23:
+        closing_msg = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי. התייחס למדדים ולסגירה."
+        send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing_msg)}")
 
 if __name__ == "__main__":
     main()
