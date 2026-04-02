@@ -23,15 +23,14 @@ def send_telegram_msg(text):
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     response = requests.post(url, json=payload)
     
-    # אם נכשל (למשל בגלל תווים מיוחדים של ה-AI), שולח כטקסט פשוט
+    # אם נכשל (בגלל תווים מיוחדים), שולח כטקסט פשוט
     if response.status_code != 200:
-        print(f"Markdown failed, sending plain text. Error: {response.text}")
         payload = {"chat_id": CHAT_ID, "text": text}
         requests.post(url, json=payload)
     
-    time.sleep(1) # המתנה קצרה למניעת חסימה
+    time.sleep(1.5) # המתנה למניעת חסימת הצפה (Rate Limit)
 
-# --- דאשבורד נתונים חיים ---
+# --- דאשבורד נתונים חיים (נראות מיידית) ---
 def get_market_dashboard():
     try:
         spy = yf.Ticker("SPY").history(period="2d")
@@ -55,17 +54,18 @@ def get_market_dashboard():
         )
     except: return "⚠️ Dashboard Unavailable\n\n"
 
-# --- מנגנון AI דינמי ---
+# --- מנגנון AI דינמי (חסין 404/429) ---
 def get_ai_response(prompt):
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         models_list = client.models.list()
+        # מוצא מודל Flash זמין (לרוב 1.5-flash)
         target_model = next((m.name for m in models_list if 'flash' in m.name), 'gemini-1.5-flash')
         response = client.models.generate_content(model=target_model, contents=prompt)
         return response.text
     except Exception as e: return f"שגיאת AI: {str(e)}"
 
-# --- גוגל דרייב ---
+# --- חיבור לגוגל דרייב ---
 def get_drive_service():
     creds, _ = google.auth.default()
     return build('drive', 'v3', credentials=creds)
@@ -86,10 +86,10 @@ def download_latest_csv(service, folder_name, file_prefix):
         return pd.read_csv(fh)
     except: return None
 
-# --- דו"ח אנליסט בכיר (הלוגיקה המקורית) ---
+# --- דו"ח אנליסט בכיר (הפרומפט המלא) ---
 def get_institutional_context():
     context_data = ""
-    # שימוש בטיקרים הנכונים
+    # איסוף חדשות מעמיק (מדדים, VIX, זהב, נפט)
     for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]: 
         try:
             news = yf.Ticker(t).news
@@ -101,17 +101,18 @@ def get_institutional_context():
     
     prompt = f"""
     אתה אנליסט מוסדי בכיר בוול סטריט (בסגנון Goldman Sachs ו-Fundstrat). 
-    נתח את כותרות החדשות הבאות:
+    נתח את כותרות החדשות הבאות לטובת סוחרים ב-2026:
     {context_data if context_data else 'אין חדשות חריגות כרגע.'}
     
     בנה דו"ח מקצועי ומסודר בנקודות (Bullet Points) הכולל:
-    1. 🏛️ 'הכסף הגדול': מה המוסדיים חושבים היום?
-    2. 💣 'מוקשים ומאקרו': האם יש אירועי מאקרו שצריך להיזהר מהם?
-    3. 🌡️ 'סנטימנט השוק': האם אנחנו ב-Risk-On או Risk-Off?
-    תכתוב בעברית מקצועית.
+    1. 🏛️ 'הכסף הגדול': מה המוסדיים חושבים או מתכננים כרגע?
+    2. 💣 'מוקשים ומאקרו': אירועים, ריבית או גיאופוליטיקה שצריך להיזהר מהם.
+    3. 🌡️ 'סנטימנט השוק': האם אנחנו ב-Risk-On או Risk-Off? מה השורה התחתונה?
+    תכתוב בעברית מקצועית וחדה.
     """
     return get_ai_response(prompt)
 
+# --- סריקת פריצות (Execution) ---
 def run_execution_scan():
     try:
         service = get_drive_service()
@@ -131,29 +132,29 @@ def run_execution_scan():
         return f"🥇 *Gold:* {', '.join(results['Gold']) or 'None'}\n🐕 *Underdogs:* {', '.join(results['Underdogs']) or 'None'}"
     except Exception as e: return f"שגיאה בסריקה: {e}"
 
-# --- המוח המרכזי ---
+# --- המוח המרכזי (ניהול זמנים ודאשבורד) ---
 def main():
+    # זיהוי סוג ההרצה
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+    
+    # זמן ישראל (UTC+3)
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    hour = now.hour
+    
     db = get_market_dashboard()
 
     if is_manual:
-        # הודעה 1: דאשבורד + פתיחה
         send_telegram_msg(f"{db}🛡️ *WTC Sentinel 2026 - Status Check*")
-        
-        # הודעה 2: דו"ח האנליסט (החלק שנעלם)
-        ai_report = get_institutional_context()
-        send_telegram_msg(f"🏛️ *Senior Analyst Report:*\n\n{ai_report}")
-        
-        # הודעה 3: סריקת ביצוע
+        send_telegram_msg(f"🏛️ *Senior Analyst Report:*\n\n{get_institutional_context()}")
         send_telegram_msg(f"🎯 *Execution Scan:*\n{run_execution_scan()}")
         return
 
-    if now.hour == 16:
+    # הרצה אוטומטית לפי טווח שעה
+    if hour == 16:
         send_telegram_msg(f"{db}🏛️ *Institutional Intelligence*\n\n{get_institutional_context()}")
-    elif now.hour == 17:
+    elif hour == 17:
         send_telegram_msg(f"{db}🎯 *WTC Execution Report*\n\n{run_execution_scan()}")
-    elif now.hour == 23:
+    elif hour == 23:
         summary_prompt = "סכם את יום המסחר בוול סטריט בנקודות קצרות. מה הייתה המגמה המרכזית ומה התובנה למחר?"
         send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_response(summary_prompt)}")
 
