@@ -100,17 +100,18 @@ def main():
     # זיהוי אם ההרצה היא ידנית דרך כפתור ה-Run Workflow
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     
-    # חישוב זמן בישראל
-    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3) # שעון קיץ ישראל
+    # חישוב זמן בישראל (UTC+3)
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     hour = now.hour
 
     if is_manual:
-        send_telegram_msg("🧪 *הרצה ידנית מזוהה - מפיק דו"ח משולב לבדיקה...*")
+        # שים לב: כאן החלפתי למירכאות בודדות בחוץ כדי שהגרשיים של ה-דו"ח לא יפריעו
+        send_telegram_msg('🧪 *הרצה ידנית מזוהה - מפיק דו"ח משולב לבדיקה...*')
         ctx = get_market_context()
         send_telegram_msg(f"🏛️ *Context Check:*\n{ctx}")
         return
 
-    # הרצה אוטומטית לפי שעה
+    # הרצה אוטומטית לפי שעה (שעות שרת מותאמות לישראל)
     if hour == 16:
         send_telegram_msg(f"🏛️ *WTC Intelligence (16:00)*\n\n{get_market_context()}")
     elif hour == 17:
@@ -118,6 +119,3 @@ def main():
         send_telegram_msg(f"🎯 *WTC Execution (17:00)*\n\nBreakouts found: {res}")
     elif hour == 23:
         send_telegram_msg(f"🌙 *WTC Closing Summary*\n\n{get_closing_summary()}")
-
-if __name__ == "__main__":
-    main()
