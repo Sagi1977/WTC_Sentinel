@@ -24,33 +24,27 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
     time.sleep(1.2)
 
-# --- חיבור והורדה מגוגל דרייב (מותאם לשמות שלך) ---
+# --- חיבור והורדה מגוגל דרייב ---
 def get_drive_service():
     creds, _ = google.auth.default()
     return build('drive', 'v3', credentials=creds)
 
-def download_csv_flexible(service, prefix):
+def download_latest_file(service, prefix):
     try:
-        # 1. חיפוש התיקייה (גמיש לשמות WTCSYSTEM או WTC_SYSTEM)
-        res = service.files().list(q="mimeType = 'application/vnd.google-apps.folder'").execute()
-        folders = res.get('files', [])
-        target_folder_id = None
-        for f in folders:
-            name = f['name'].replace("_", "").upper()
-            if name == "WTCSYSTEM":
-                target_folder_id = f['id']
-                break
-        
-        if not target_folder_id: return None, "תיקיית המערכת לא נמצאה"
-        
-        # 2. חיפוש הקובץ הכי חדש עם הקידומת שלך (GoldenPlan)
-        query = f"'{target_folder_id}' in parents and name contains '{prefix}'"
-        res = service.files().list(q=query, orderBy="createdTime desc").execute()
+        # חיפוש גלובלי של הקובץ הכי חדש שמכיל את השם (ללא תלות בתיקייה)
+        query = f"name contains '{prefix}' and mimeType = 'text/csv'"
+        res = service.files().list(q=query, orderBy="createdTime desc", fields="files(id, name)").execute()
         files = res.get('files', [])
-        if not files: return None, f"קובץ {prefix} לא נמצא"
         
-        # 3. הורדה
+        if not files:
+            # ניסיון נוסף ללא פילטר mimeType (למקרה שגוגל מזהה את ה-CSV אחרת)
+            res = service.files().list(q=f"name contains '{prefix}'", orderBy="createdTime desc").execute()
+            files = res.get('files', [])
+            if not files: return None, f"קובץ {prefix} לא נמצא"
+
         file_id = files[0]['id']
+        file_name = files[0]['name']
+        
         req = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, req)
@@ -61,9 +55,9 @@ def download_csv_flexible(service, prefix):
         fh.seek(0)
         df = pd.read_csv(fh)
         df.columns = [c.strip().capitalize() for c in df.columns]
-        return df, "success"
+        return df, f"✅ נטען: {file_name}"
     except Exception as e:
-        return None, str(e)
+        return None, f"❌ שגיאה: {str(e)}"
 
 # --- דאשבורד וניתוח ---
 def get_market_dashboard():
@@ -74,41 +68,48 @@ def get_market_dashboard():
         s_c = ((spy['Close'].iloc[-1] / spy['Close'].iloc[-2]) - 1) * 100
         status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
-        return f"📊 *WTC Dashboard*\n`--------------------------`\n🚦 *Status:* `{status}` {emoji}\n📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
+        return f"📊 *WTC Sentinel Dashboard*\n`--------------------------`\n🚦 *Status:* `{status}` {emoji}\n📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n`--------------------------`\n"
     except: return "⚠️ Dashboard Offline\n\n"
 
 def get_institutional_report():
-    news = ""
+    news_text = ""
     for t in ["^GSPC", "^IXIC", "^VIX", "GC=F", "CL=F"]:
         try:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
-                if title: news += f"- {title}\n"
+                if title: news_text += f"- {title}\n"
         except: continue
     
-    prompt = f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nבנה דוח בנקודות:\n## דוח אסטרטגי WTC\n### 🏛️ 1. 'הכסף הגדול'\n### 💣 2. 'מוקשים ומאקרו'\n### 🌡️ 3. 'סנטימנט השוק'"
+    prompt = f"""
+    ענה בעברית כמחלקת מחקר של גולדמן סאקס. נתח חדשות: {news_text}
+    בנה דוח בנקודות:
+    ## דוח ניתוח שוק - תמונת מצב אסטרטגית
+    ### 🏛️ 1. 'הכסף הגדול': מוסדיים ואסטרטגיה
+    ### 💣 2. 'מוקשים ומאקרו': סיכונים וגיאופוליטיקה
+    ### 🌡️ 3. 'סנטימנט השוק': שורה תחתונה לסוחר
+    """
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח."
+    except: return "⚠️ שגיאת AI בניתוח החדשות."
 
 # --- סריקת פריצות (Execution) ---
 def run_execution_scan(service):
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
-        return "🛑 *הבורסה סגורה.*"
+        return "🛑 *Market Closed.*"
     
     results = {"Gold": [], "Underdogs": []}
-    log = ""
+    debug_log = ""
     
-    # שימוש בקידומות האמיתיות שנמצאו בדרייב שלך
+    # שימוש בשמות האמיתיים שמופיעים בדרייב שלך
     for prefix in ["GoldenPlanSTOCKS", "GoldenPlanETF"]:
-        df, status = download_csv_flexible(service, prefix)
-        if df is not None:
-            log += f"✅ נסרקו {len(df)} נכסים מ-{prefix}\n"
+        df, status = download_latest_file(service, prefix)
+        debug_log += f"{status}\n"
+        
+        if df is not None and 'Ticker' in df.columns:
             for _, row in df.iterrows():
-                if 'Ticker' not in df.columns: continue
                 ticker = str(row['Ticker']).strip()
                 score = row.get('Score', 0)
                 try:
@@ -120,10 +121,8 @@ def run_execution_scan(service):
                         if score >= 75: results["Gold"].append(ticker)
                         elif score < 60: results["Underdogs"].append(ticker)
                 except: continue
-        else:
-            log += f"❌ {prefix}: {status}\n"
 
-    report = f"🎯 *WTC Execution Scan*\n{log}\n"
+    report = f"🎯 *Execution Scan Result:*\n{debug_log}\n"
     report += f"🥇 *Gold:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
     report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}"
     return report
@@ -136,7 +135,7 @@ def main():
     db = get_market_dashboard()
 
     if is_manual:
-        send_telegram_msg(f"{db}🛡️ *Manual Mode*")
+        send_telegram_msg(f"{db}🛡️ *WTC Sentinel - Manual Execution*")
         send_telegram_msg(get_institutional_report())
         send_telegram_msg(run_execution_scan(service))
         return
