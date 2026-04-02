@@ -9,7 +9,7 @@ from googleapiclient.http import MediaIoBaseDownload
 import google.auth
 import io
 
-# --- הגדרות סודות ---
+# --- הגדרות וחיבורים ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
@@ -20,67 +20,104 @@ def send_telegram_msg(text):
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
-# --- פונקציית ה-AI ---
+# --- פונקציות AI (Gemini) ---
 def get_ai_analysis(prompt):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    response = model.generate_content(prompt)
-    return response.text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"שגיאת AI: {str(e)}"
 
-# --- משיכת חדשות מוסדיים ---
+# --- דו"ח 16:00 - הקשר מוסדי ומאקרו ---
 def get_market_context():
-    # מושך חדשות על השוק ועל דמויות מפתח
-    search_query = "Tom Lee Fundstrat, Goldman Sachs market outlook, Fed interest rate news"
-    tickers = ["^GSPC", "^IXIC", "VIX"]
+    tickers = ["^GSPC", "^IXIC", "VIX", "GC=F"] # מדדים, ויקס וזהב
     context_data = ""
-    
     for t in tickers:
-        ticker_data = yf.Ticker(t)
-        news = ticker_data.news[:3]
-        for n in news:
+        ticker_news = yf.Ticker(t).news[:2]
+        for n in ticker_news:
             context_data += f"- {n['title']}\n"
     
     prompt = f"""
-    אתה אנליסט מוסדי בכיר בוול סטריט. נתח את כותרות החדשות הבאות:
+    אתה אנליסט מוסדי בכיר. נתח את החדשות הבאות:
     {context_data}
     
-    בנה דו"ח קצר לטלגרם הכולל:
-    1. 'הכסף הגדול': מה המוסדיים (גולדמן, טום לי) חושבים היום?
-    2. 'מוקשים': האם יש הודעת פד או אירוע מאקרו קריטי?
-    3. 'סנטימנט': האם השוק במצב של Risk-On או Risk-Off?
-    תכתוב בעברית קולחת ומקצועית.
+    בנה דו"ח קצר לטלגרם (בעברית):
+    1. מה הכסף הגדול (המוסדיים) מתכנן היום?
+    2. האם יש אירועי מאקרו/פד קריטיים?
+    3. מה הסנטימנט הכללי (Risk-On/Off)?
     """
     return get_ai_analysis(prompt)
 
-# --- לוגיקת סריקה (דו"ח 17:00) ---
-def run_execution_scan():
-    # (הקוד הקיים שלך מהשלב הקודם שסורק את הדרייב ומחפש פריצות)
-    return "נציג כאן את תוצאות הפריצות שמצאנו בדרייב..."
+# --- דו"ח 17:00 - סריקת פריצות (Drive + Yahoo Finance) ---
+def get_drive_service():
+    creds, _ = google.auth.default()
+    return build('drive', 'v3', credentials=creds)
 
-# --- דו"ח נעילה (23:00) ---
+def download_latest_csv(service, folder_name, file_prefix):
+    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder'"
+    results = service.files().list(q=query, fields="files(id)").execute()
+    items = results.get('files', [])
+    if not items: return None
+    folder_id = items[0]['id']
+    query = f"'{folder_id}' in parents and name contains '{file_prefix}' and mimeType = 'text/csv'"
+    results = service.files().list(q=query, orderBy="createdTime desc", fields="files(id, name)").execute()
+    files = results.get('files', [])
+    if not files: return None
+    request = service.files().get_media(fileId=files[0]['id'])
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done: _, done = downloader.next_chunk()
+    fh.seek(0)
+    return pd.read_csv(fh)
+
+def run_execution_scan():
+    service = get_drive_service()
+    df_stocks = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_Stocks")
+    df_etfs = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_ETFs")
+    
+    found = []
+    for df in [df_stocks, df_etfs]:
+        if df is None: continue
+        for _, row in df.iterrows():
+            ticker = row['Ticker']
+            try:
+                data = yf.download(ticker, period="1d", interval="5m", progress=False)
+                if len(data) < 7: continue
+                if data['Close'].iloc[-1] > data.iloc[:6]['High'].max():
+                    found.append(ticker)
+            except: continue
+    return ", ".join(found) if found else "None"
+
+# --- דו"ח 23:00 - סיכום נעילה ---
 def get_closing_summary():
-    prompt = "סכם את יום המסחר בוול סטריט בעברית. מי הסקטורים שניצחו ומי הפסידו? מה התובנה המרכזית למחר?"
+    prompt = "סכם את יום המסחר בוול סטריט בעברית. מי ניצח היום ומה התובנה הכי חשובה למחר?"
     return get_ai_analysis(prompt)
 
-# --- המוח המרכזי ---
+# --- המוח המרכזי: ניהול זמנים ומצב ידני ---
 def main():
-    now_israel = datetime.datetime.now() + datetime.timedelta(hours=2) # התאמה לשעון ישראל
-    hour = now_israel.hour
+    # זיהוי אם ההרצה היא ידנית דרך כפתור ה-Run Workflow
+    is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     
+    # חישוב זמן בישראל
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3) # שעון קיץ ישראל
+    hour = now.hour
+
+    if is_manual:
+        send_telegram_msg("🧪 *הרצה ידנית מזוהה - מפיק דו"ח משולב לבדיקה...*")
+        ctx = get_market_context()
+        send_telegram_msg(f"🏛️ *Context Check:*\n{ctx}")
+        return
+
+    # הרצה אוטומטית לפי שעה
     if hour == 16:
-        print("Running Context Report...")
-        report = f"🏛️ *WTC Institutional Intelligence (16:00)*\n\n{get_market_context()}"
-        send_telegram_msg(report)
-    
+        send_telegram_msg(f"🏛️ *WTC Intelligence (16:00)*\n\n{get_market_context()}")
     elif hour == 17:
-        print("Running Execution Report...")
-        # כאן תרוץ פונקציית הסריקה הקודמת שלך
-        # ...
-        send_telegram_msg("🎯 *WTC 17:00 Execution Report*...")
-        
+        res = run_execution_scan()
+        send_telegram_msg(f"🎯 *WTC Execution (17:00)*\n\nBreakouts found: {res}")
     elif hour == 23:
-        print("Running Closing Report...")
-        report = f"🌙 *WTC Daily Closing Summary*\n\n{get_closing_summary()}"
-        send_telegram_msg(report)
+        send_telegram_msg(f"🌙 *WTC Closing Summary*\n\n{get_closing_summary()}")
 
 if __name__ == "__main__":
     main()
