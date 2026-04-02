@@ -22,7 +22,7 @@ def get_ai_summary():
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         response = client.models.generate_content(
-            model="gemini-2.0-flash", # המודל העדכני ל-2026
+            model="gemini-1.5-flash", # המודל העדכני ל-2026
             contents="תן משפט מוטיבציה קצר לסוחר מניות בעברית"
         )
         return response.text
