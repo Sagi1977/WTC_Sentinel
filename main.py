@@ -3,16 +3,16 @@ import datetime
 import pandas as pd
 import yfinance as yf
 import requests
-import google.generativeai as genai
+from google import genai # הספרייה החדשה
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import google.auth
 import io
 
-# --- הגדרות וסודות ---
+# --- הגדרות ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 
 def send_telegram_msg(text):
     if not text: return
@@ -20,16 +20,18 @@ def send_telegram_msg(text):
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
-# --- מנגנון AI חכם ---
+# --- מנגנון AI חדיש (2026 Ready) ---
 def get_ai_response(prompt):
     try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        selected_model = next((m for m in available_models if '1.5-flash' in m), available_models[0])
-        model = genai.GenerativeModel(selected_model)
-        response = model.generate_content(prompt)
+        client = genai.Client(api_key=GEMINI_KEY)
+        # משתמשים במודל הכי חזק וזמין כרגע
+        response = client.models.generate_content(
+            model='gemini-2.0-flash', 
+            contents=prompt
+        )
         return response.text
     except Exception as e:
-        return f"שגיאת AI: {str(e)}"
+        return f"שגיאת AI (2026 SDK): {str(e)}"
 
 # --- חיבור לגוגל דרייב ---
 def get_drive_service():
@@ -58,38 +60,53 @@ def download_latest_csv(service, folder_name, file_prefix):
         return pd.read_csv(fh)
     except: return None
 
-# --- פונקציות הדו"חות ---
+# --- דו"חות חסינים ---
 def get_institutional_context():
     context_data = ""
     for t in ["^GSPC", "^IXIC", "VIX"]:
-        news = yf.Ticker(t).news[:2]
-        for n in news: context_data += f"- {n['title']}\n"
+        try:
+            ticker = yf.Ticker(t)
+            news = ticker.news
+            if news:
+                # הגנה מפני שינויים במבנה של yfinance
+                for n in news[:2]:
+                    title = n.get('title') or n.get('content', {}).get('title')
+                    if title:
+                        context_data += f"- {title}\n"
+        except: continue
     
-    prompt = f"אתה אנליסט מוסדי. נתח את החדשות הבאות בעברית: {context_data}. מה הכסף הגדול חושב היום? האם יש הודעות פד/מאקרו?"
+    if not context_data:
+        context_data = "לא נמצאו חדשות חריגות כרגע, מנתח לפי תנועת מחיר בלבד."
+        
+    prompt = f"אתה אנליסט מוסדי. נתח את הסנטימנט של וול סטריט בעברית לפי המידע הבא: {context_data}"
     return get_ai_response(prompt)
 
 def run_execution_scan():
-    service = get_drive_service()
-    df_stocks = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_Stocks")
-    df_etfs = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_ETFs")
-    
-    results = {"Gold": [], "Underdogs": []}
-    
-    for df in [df_stocks, df_etfs]:
-        if df is None: continue
-        for _, row in df.iterrows():
-            ticker, score = row['Ticker'], row['Score']
-            try:
-                data = yf.download(ticker, period="1d", interval="5m", progress=False)
-                if len(data) < 7: continue
-                if data['Close'].iloc[-1] > data.iloc[:6]['High'].max():
-                    if score >= 75: results["Gold"].append(ticker)
-                    elif score < 60: results["Underdogs"].append(ticker)
-            except: continue
-    
-    report = f"🥇 *Gold Breakouts:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
-    report += f"🐕 *Underdog Breakouts:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}"
-    return report
+    try:
+        service = get_drive_service()
+        df_stocks = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_Stocks")
+        df_etfs = download_latest_csv(service, "WTC_SYSTEM", "WTC_Intelligence_ETFs")
+        
+        results = {"Gold": [], "Underdogs": []}
+        
+        for df in [df_stocks, df_etfs]:
+            if df is None: continue
+            for _, row in df.iterrows():
+                ticker = row['Ticker']
+                score = row.get('Score', 0)
+                try:
+                    data = yf.download(ticker, period="1d", interval="5m", progress=False)
+                    if len(data) < 7: continue
+                    if data['Close'].iloc[-1] > data.iloc[:6]['High'].max():
+                        if score >= 75: results["Gold"].append(ticker)
+                        elif score < 60: results["Underdogs"].append(ticker)
+                except: continue
+        
+        report = f"🥇 *Gold:* {', '.join(results['Gold']) if results['Gold'] else 'None'}\n"
+        report += f"🐕 *Underdogs:* {', '.join(results['Underdogs']) if results['Underdogs'] else 'None'}"
+        return report
+    except Exception as e:
+        return f"שגיאה בסריקה: {str(e)}"
 
 # --- המוח המרכזי ---
 def main():
@@ -98,18 +115,29 @@ def main():
     hour = now_israel.hour
 
     if is_manual:
-        send_telegram_msg("🧪 *WTC Sentinel Health Check*")
-        send_telegram_msg(f"🏛️ *Context:*\n{get_institutional_context()}")
-        send_telegram_msg(f"🎯 *Current Scan:*\n{run_execution_scan()}")
+        send_telegram_msg("🛡️ *WTC Sentinel 2026 - Manual Mode*")
+        # מריצים את ה-Context בנפרד כדי שאם הוא ייכשל, הסריקה עדיין תעבוד
+        try:
+            ctx = get_institutional_context()
+            send_telegram_msg(f"🏛️ *Institutional Context:*\n{ctx}")
+        except Exception as e:
+            send_telegram_msg(f"⚠️ שגיאה בדווח מוסדי: {e}")
+            
+        try:
+            scan = run_execution_scan()
+            send_telegram_msg(f"🎯 *Market Scan:*\n{scan}")
+        except Exception as e:
+            send_telegram_msg(f"⚠️ שגיאה בסריקת מניות: {e}")
         return
 
+    # הרצה אוטומטית (נשאר לפי השעות שקבענו)
     if hour == 16:
-        send_telegram_msg(f"🏛️ *WTC Institutional Intelligence (16:00)*\n\n{get_institutional_context()}")
+        send_telegram_msg(f"🏛️ *WTC Context (16:00)*\n\n{get_institutional_context()}")
     elif hour == 17:
-        send_telegram_msg(f"🎯 *WTC Execution Report (17:00)*\n\n{run_execution_scan()}")
+        send_telegram_msg(f"🎯 *WTC Execution (17:00)*\n\n{run_execution_scan()}")
     elif hour == 23:
-        summary = get_ai_response("סכם את יום המסחר בוול סטריט בעברית ומה התובנה למחר?")
-        send_telegram_msg(f"🌙 *WTC Daily Closing Summary*\n\n{summary}")
+        summary = get_ai_response("סכם את יום המסחר בוול סטריט בעברית.")
+        send_telegram_msg(f"🌙 *WTC Closing Report*\n\n{summary}")
 
 if __name__ == "__main__":
     main()
