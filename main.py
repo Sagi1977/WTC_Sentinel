@@ -20,23 +20,20 @@ def send_telegram_msg(text):
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
-# --- פונקציית הנראות (Dashboard) ---
+# --- דאשבורד נתונים חיים ---
 def get_market_dashboard():
     try:
         spy = yf.Ticker("SPY").history(period="2d")
         vix = yf.Ticker("^VIX").history(period="1d")
-        
         spy_price = spy['Close'].iloc[-1]
         spy_change = ((spy['Close'].iloc[-1] / spy['Close'].iloc[-2]) - 1) * 100
         vix_price = vix['Close'].iloc[-1]
         
         status = "BULLISH" if vix_price < 18 else "CAUTION" if vix_price < 25 else "BEARISH"
         emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
-        
-        # המלצת פעולה מהירה
         action = "Market is healthy." if status == "BULLISH" else "Trade with smaller sizes." if status == "CAUTION" else "High risk! Protect capital."
         
-        dashboard = (
+        return (
             f"📊 *WTC Intelligence Dashboard*\n"
             f"`--------------------------`\n"
             f"🚦 *Status:* `{status}` {emoji}\n"
@@ -45,9 +42,7 @@ def get_market_dashboard():
             f"`--------------------------`\n"
             f"💡 *Action:* `{action}`\n\n"
         )
-        return dashboard
-    except:
-        return "⚠️ Dashboard Data Unavailable\n\n"
+    except: return "⚠️ Dashboard Unavailable\n\n"
 
 # --- מנגנון AI דינמי ---
 def get_ai_response(prompt):
@@ -57,8 +52,7 @@ def get_ai_response(prompt):
         target_model = next((m.name for m in models_list if 'flash' in m.name), 'gemini-1.5-flash')
         response = client.models.generate_content(model=target_model, contents=prompt)
         return response.text
-    except Exception as e:
-        return f"שגיאת AI: {str(e)}"
+    except Exception as e: return f"שגיאת AI: {str(e)}"
 
 # --- גוגל דרייב ---
 def get_drive_service():
@@ -81,10 +75,11 @@ def download_latest_csv(service, folder_name, file_prefix):
         return pd.read_csv(fh)
     except: return None
 
-# --- דו"חות ---
+# --- דו"ח אנליסט בכיר מורחב ---
 def get_institutional_context():
     context_data = ""
-    for t in ["^GSPC", "^IXIC", "VIX"]:
+    # איסוף חדשות מעמיק יותר
+    for t in ["^GSPC", "^IXIC", "VIX", "GC=F", "CL=F"]: # כולל זהב ונפט להקשר מאקרו
         try:
             news = yf.Ticker(t).news
             if news:
@@ -92,7 +87,21 @@ def get_institutional_context():
                     title = n.get('title') or n.get('content', {}).get('title')
                     if title: context_data += f"- {title}\n"
         except: continue
-    return get_ai_response(f"נתח את הסנטימנט בוול סטריט בעברית: {context_data if context_data else 'אין חדשות'}")
+    
+    # הפרומפט המקצועי שביקשת
+    prompt = f"""
+    אתה אנליסט מוסדי בכיר בוול סטריט (בסגנון Goldman Sachs ו-Fundstrat). 
+    נתח את כותרות החדשות הבאות מהדקות האחרונות בבורסה:
+    {context_data if context_data else 'אין חדשות חריגות כרגע, נתח לפי המצב הכללי ב-2026.'}
+    
+    בנה דו"ח מקצועי, חד ומסודר בנקודות (Bullet Points) הכולל:
+    1. 🏛️ 'הכסף הגדול': מה המוסדיים והשחקנים הגדולים (כמו טום לי) מתכננים או חושבים היום?
+    2. 💣 'מוקשים ומאקרו': האם יש הודעות פד, נתוני אינפלציה, ריבית או אירועים גיאופוליטיים שצריך להיזהר מהם?
+    3. 🌡️ 'סנטימנט השוק': האם אנחנו ב-Risk-On או Risk-Off? מה השורה התחתונה לסוחר בתוך היום?
+    
+    תכתוב בעברית קולחת ומקצועית של סוחרים.
+    """
+    return get_ai_response(prompt)
 
 def run_execution_scan():
     try:
@@ -111,29 +120,27 @@ def run_execution_scan():
                             elif score < 60: results["Underdogs"].append(ticker)
                     except: continue
         return f"🥇 *Gold:* {', '.join(results['Gold']) or 'None'}\n🐕 *Underdogs:* {', '.join(results['Underdogs']) or 'None'}"
-    except Exception as e: return f"שגיאת סריקה: {e}"
+    except Exception as e: return f"שגיאה בסריקה: {e}"
 
 # --- המוח המרכזי ---
 def main():
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    
-    # יצירת הדאשבורד המשותף לכל ההודעות
-    dashboard = get_market_dashboard()
+    db = get_market_dashboard()
 
     if is_manual:
-        send_telegram_msg(f"{dashboard}🛡️ *WTC Sentinel 2026 - Manual Mode*")
-        send_telegram_msg(f"🏛️ *Institutional Context:*\n{get_institutional_context()}")
-        send_telegram_msg(f"🎯 *Market Scan:*\n{run_execution_scan()}")
+        send_telegram_msg(f"{db}🛡️ *WTC Sentinel 2026 - Status Check*")
+        send_telegram_msg(f"🏛️ *Senior Analyst Report:*\n\n{get_institutional_context()}")
+        send_telegram_msg(f"🎯 *Execution Scan:*\n{run_execution_scan()}")
         return
 
     if now.hour == 16:
-        send_telegram_msg(f"{dashboard}🏛️ *Institutional Intelligence*\n\n{get_institutional_context()}")
+        send_telegram_msg(f"{db}🏛️ *Institutional Intelligence*\n\n{get_institutional_context()}")
     elif now.hour == 17:
-        send_telegram_msg(f"{dashboard}🎯 *WTC Execution Report*\n\n{run_execution_scan()}")
+        send_telegram_msg(f"{db}🎯 *WTC Execution Report*\n\n{run_execution_scan()}")
     elif now.hour == 23:
-        summary = get_ai_response("סכם את יום המסחר בעברית.")
-        send_telegram_msg(f"{dashboard}🌙 *WTC Closing Summary*\n\n{summary}")
+        summary_prompt = "סכם את יום המסחר בוול סטריט בנקודות קצרות. מה הייתה המגמה המרכזית ומה התובנה למחר?"
+        send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_response(summary_prompt)}")
 
 if __name__ == "__main__":
     main()
