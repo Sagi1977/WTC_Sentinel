@@ -31,7 +31,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai
+          pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-generativeai
 
       - name: Run Sentinel Script
         env:
