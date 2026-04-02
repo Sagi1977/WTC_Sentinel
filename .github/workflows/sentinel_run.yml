@@ -1,0 +1,40 @@
+name: WTC Sentinel Execution
+on:
+  schedule:
+    # ירוץ ב-16:00 וב-17:00 (שעון ישראל) בימי שני עד שישי
+    - cron: '0 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
+  workflow_dispatch: # מאפשר לך להריץ ידנית בלחיצת כפתור לבדיקה
+
+jobs:
+  run-sentinel:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write' # קריטי עבור החיבור המאובטח שיצרנו
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Run Sentinel Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: python main.py
