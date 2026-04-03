@@ -45,34 +45,17 @@ def download_latest_file(service, prefix):
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
-# --- FIX: פונקציית עזר לחילוץ עמודה מ-MultiIndex או Index רגיל ---
+# --- עזר: תמיכה ב-MultiIndex של yfinance חדש ---
 def extract_col(df, col_name):
-    """
-    תומך גם ב-yfinance חדש (MultiIndex) וגם ישן (עמודות רגילות).
-    """
+    """תומך ב-yfinance >= 0.2.x (MultiIndex) וגם בגרסאות ישנות."""
+    if df is None or df.empty:
+        return None
     if isinstance(df.columns, pd.MultiIndex):
-        # yfinance >= 0.2.x מחזיר ('Close', 'TICKER')
         level0 = df.columns.get_level_values(0)
         if col_name in level0:
-            return df[col_name].iloc[:, 0]  # קח את הטיקר הראשון
+            return df[col_name].iloc[:, 0]
         return None
-    else:
-        return df[col_name] if col_name in df.columns else None
-
-# --- FIX: פונקציית עזר להשוואת תאריכים עם timezone ---
-def filter_today(df, today_date):
-    """
-    מסנן שורות לפי תאריך תוך התחשבות ב-timezone.
-    """
-    try:
-        if hasattr(df.index, 'tz') and df.index.tz is not None:
-            idx_dates = df.index.tz_convert('Asia/Jerusalem').date
-        else:
-            idx_dates = pd.Series(df.index).dt.date.values
-        mask = [d == today_date for d in idx_dates]
-        return df[mask]
-    except:
-        return df[df.index.date == today_date]
+    return df[col_name] if col_name in df.columns else None
 
 # --- 1. בניית רשימה דינמית ---
 def build_dynamic_watchlist(service):
@@ -98,67 +81,70 @@ def build_dynamic_watchlist(service):
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# --- 2. ביצועי פורטפוליו (FIX: MultiIndex + Timezone + Day/Wk%) ---
+# --- 2. ביצועי פורטפוליו ---
+# Day%  = מחיר עכשיו vs. Open הנר הראשון של היום   (מ-period="1d", interval="5m")
+# Wk%   = מחיר עכשיו vs. Open הנר הראשון של יום שני (מ-start=mon_date, interval="1h")
+# Status = האם מחיר עכשיו >= גבוה 6 הנרות הראשונים של היום (פתיחת מסחר)
 def get_portfolio_performance(watchlist):
-    if not watchlist: return "⚠️ Watchlist empty - Check CSV labels.\n"
+    if not watchlist:
+        return "⚠️ Watchlist empty - Check CSV labels.\n"
 
     now_isr = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    days_to_mon = now_isr.weekday()
+    days_to_mon = now_isr.weekday()  # שני=0 ... שישי=4
     mon_date = (now_isr - datetime.timedelta(days=days_to_mon)).date()
 
-    report = "📈 *WTC Portfolio Watch*\n"
-    report += "`Type       | Ticker | Price | Day%  | Wk%   | Status`\n"
-    report += "`--------------------------------------------------`\n"
+    report  = "📈 *WTC Portfolio Watch*\n"
+    report += "`Type       | Ticker | Price  | Day%  | Wk%   | Status`\n"
+    report += "`----------------------------------------------------`\n"
 
     for t, label in watchlist.items():
         try:
-            # --- FIX 1: הורדת נתוני שבוע ---
-            wk_raw = yf.download(t, start=mon_date.strftime('%Y-%m-%d'), interval="1h", progress=False)
+            # ── Wk%: נרות שעה מתחילת יום שני ──────────────────────────
+            wk_raw   = yf.download(t, start=mon_date.strftime('%Y-%m-%d'),
+                                   interval="1h", progress=False)
+            close_wk = extract_col(wk_raw, 'Close')
+            open_wk  = extract_col(wk_raw, 'Open')
 
-            if wk_raw.empty:
-                report += f"`{label[:8]:<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️ NoData`\n"
+            if close_wk is None or close_wk.empty:
+                report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️ NoData`\n"
                 continue
 
-            # --- FIX 2: תמיכה ב-MultiIndex ---
-            close_s = extract_col(wk_raw, 'Close')
-            open_s  = extract_col(wk_raw, 'Open')
+            curr_p  = float(close_wk.iloc[-1])
+            wk_open = float(open_wk.iloc[0])           # Open ראשון של יום שני
+            wk_chg  = ((curr_p / wk_open) - 1) * 100
 
-            if close_s is None or open_s is None:
-                report += f"`{label[:8]:<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️ ColErr`\n"
-                continue
+            # ── Day%: נרות 5 דקות של היום בלבד ────────────────────────
+            d5_raw    = yf.download(t, period="1d", interval="5m", progress=False)
+            open_d5   = extract_col(d5_raw, 'Open')
+            high_d5   = extract_col(d5_raw, 'High')
 
-            curr_p = float(close_s.iloc[-1])
-            wk_open = float(open_s.iloc[0])
-            wk_chg = ((curr_p / wk_open) - 1) * 100
-
-            # --- FIX 3: Day% עם timezone-aware filtering ---
-            today_data = filter_today(wk_raw, now_isr.date())
-            if not today_data.empty:
-                today_open_s = extract_col(today_data, 'Open')
-                day_open = float(today_open_s.iloc[0]) if today_open_s is not None and not today_open_s.empty else wk_open
+            if open_d5 is not None and not open_d5.empty:
+                day_open = float(open_d5.iloc[0])       # Open נר ראשון של היום
             else:
-                day_open = wk_open  # fallback
+                day_open = wk_open                      # fallback
 
             day_chg = ((curr_p / day_open) - 1) * 100
 
-            # --- FIX 4: Status מול גבוה הבוקר ---
-            d5_raw = yf.download(t, period="1d", interval="5m", progress=False)
-            high_s = extract_col(d5_raw, 'High')
-            if high_s is not None and len(high_s) >= 6:
-                o_high = float(high_s.iloc[:6].max())
+            # ── Status: מחיר עכשיו vs. גבוה פתיחה (6 נרות ראשונים) ───
+            if high_d5 is not None and len(high_d5) >= 6:
+                open_high = float(high_d5.iloc[:6].max())
             else:
-                o_high = curr_p
+                open_high = curr_p
 
-            status = "✅ Break" if curr_p >= o_high else "❌ Below"
-            type_label = label[:8] if len(label) <= 8 else label[:7] + "."
+            status     = "✅ Break" if curr_p >= open_high else "❌ Below"
+            type_label = (label[:7] + ".") if len(label) > 8 else label[:8]
 
-            report += f"`{type_label:<8} | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            report += (
+                f"`{type_label:<8} | {t:<5} | {curr_p:>6.2f} | "
+                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            )
 
-        except Exception as e:
-            report += f"`{label[:8]:<8} | {t:<5} | N/A    | N/A   | N/A   | ❌ Err`\n"
+        except Exception:
+            report += f"`{'Err':<8} | {t:<5} | N/A    | N/A   | N/A   | ❌ Err`\n"
             continue
 
-    return report + "`--------------------------------------------------`\n"
+    report += "`----------------------------------------------------`\n"
+    return report
 
 # --- 3. ניתוח AI מוסדי ---
 def get_ai_report(custom_prompt=None):
@@ -170,7 +156,8 @@ def get_ai_report(custom_prompt=None):
                 if title: news += f"- {title}\n"
         p = custom_prompt if custom_prompt else (
             f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\n"
-            f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+            f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
+            f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
         )
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
@@ -188,7 +175,7 @@ def run_execution_scan(service):
             for _, row in df.iterrows():
                 t = str(row.get(t_col, '')).strip()
                 try:
-                    d_raw = yf.download(t, period="1d", interval="5m", progress=False)
+                    d_raw   = yf.download(t, period="1d", interval="5m", progress=False)
                     close_s = extract_col(d_raw, 'Close')
                     high_s  = extract_col(d_raw, 'High')
                     if close_s is None or high_s is None or len(close_s) < 7:
@@ -198,26 +185,31 @@ def run_execution_scan(service):
                 except:
                     continue
 
-    vix = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
-    report = f"🎯 *Execution Scan Result:*\n🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
+    vix     = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
+    report  = f"🎯 *Execution Scan Result:*\n"
+    report += f"🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n"
+    report += f"🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
     if not res["STOCKS"] and not res["ETF"]:
-        report += "💡 *סיכום טכני:* השוק בדשדוש; אין פריצות מעל גבוה הבוקר. " + ("להמתין ל-VIX." if vix > 22 else "")
+        report += "💡 *סיכום טכני:* השוק בדשדוש; אין פריצות מעל גבוה הבוקר."
+        if vix > 22: report += " להמתין ל-VIX."
     else:
-        report += f"🚀 *סיכום טכני:* זוהו פריצות מומנטום ב-{len(res['STOCKS']) + len(res['ETF'])} נכסים."
+        total = len(res['STOCKS']) + len(res['ETF'])
+        report += f"🚀 *סיכום טכני:* זוהו פריצות מומנטום ב-{total} נכסים."
     return report
 
 # --- MAIN ---
 def main():
     service = get_drive_service()
-    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    hour, is_manual = now.hour, os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+    now     = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    hour    = now.hour
+    is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
 
-    spy = yf.Ticker("SPY").history(period="2d")
+    spy     = yf.Ticker("SPY").history(period="2d")
     vix_val = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
-    s_p = float(spy['Close'].iloc[-1])
-    s_c = ((s_p / float(spy['Close'].iloc[-2])) - 1) * 100
+    s_p     = float(spy['Close'].iloc[-1])
+    s_c     = ((s_p / float(spy['Close'].iloc[-2])) - 1) * 100
     status_label = 'BEARISH' if vix_val > 25 else 'CAUTION' if vix_val > 18 else 'BULLISH'
 
     header = (
