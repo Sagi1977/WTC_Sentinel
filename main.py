@@ -221,10 +221,12 @@ def build_underdog_list(service):
         if not sel or tcol not in df.columns:
             continue
         mask = ~df[sel].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
+        score_col = next((c for c in df.columns if 'score' in c), None)
         for _, row in df[mask].iterrows():
-            t = str(row[tcol]).strip().upper()
+            t     = str(row[tcol]).strip().upper()
+            score = row.get(score_col, 'N/A') if score_col else 'N/A'
             if t:
-                underdogs.append((t, bucket))
+                underdogs.append((t, bucket, score))
     return underdogs
 
 
@@ -238,7 +240,7 @@ def run_execution_scan(service):
     underdogs = build_underdog_list(service)
     res       = {"STOCKS": [], "ETF": []}
 
-    for t, bucket in underdogs:
+    for t, bucket, score in underdogs:
         try:
             d5_today = get_5m_rth(t, period='1d')
             close_s  = extract_col(d5_today, 'Close')
@@ -258,7 +260,7 @@ def run_execution_scan(service):
 
             # קריטריון: Wk% > +5% בלבד
             if wk_chg > 5:
-                res[bucket].append((t, curr_p, day_chg, wk_chg))
+                res[bucket].append((t, curr_p, day_chg, wk_chg, score))
         except:
             continue
 
@@ -274,19 +276,19 @@ def run_execution_scan(service):
 
     report += "🥇 *STOCKS:*\n"
     if res['STOCKS']:
-        report += "`Ticker | Price  | Day%  | Wk%`\n"
-        report += "`-------------------------------`\n"
-        for t, p, d, w in res['STOCKS']:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}%`\n"
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res['STOCKS']:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
         report += "_None_\n"
 
     report += "\n🏅 *ETF:*\n"
     if res['ETF']:
-        report += "`Ticker | Price  | Day%  | Wk%`\n"
-        report += "`-------------------------------`\n"
-        for t, p, d, w in res['ETF']:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}%`\n"
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res['ETF']:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
         report += "_None_\n"
 
