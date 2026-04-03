@@ -2,7 +2,6 @@ name: WTC Telegram Bot (On-Demand)
 
 on:
   schedule:
-    # כל דקה — Bot תמיד ער, אין "חלון עיוור"
     - cron: '* * * * *'
   workflow_dispatch:
 
