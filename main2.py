@@ -25,6 +25,7 @@ def send_telegram_msg(text):
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
     time.sleep(1.2)
 
+# --- גוגל דרייב ---
 def get_drive_service():
     creds, _ = google.auth.default()
     return build('drive', 'v3', credentials=creds)
@@ -45,75 +46,72 @@ def download_latest_file(service, prefix):
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
-# --- 1. בניית רשימה דינמית (זיהוי אגרסיבי) ---
+# --- 1. בניית רשימת מעקב (חסינה וגמישה) ---
 def build_dynamic_watchlist(service):
     watchlist = {}
     logs = []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is not None:
-            # ניקוי עמודות למניעת בעיות אמוג'י
-            clean_cols = {c: re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() for c in df.columns}
-            df = df.rename(columns=clean_cols)
-            
-            sel_col = next((c for c in df.columns if 'final' in c or 'selection' in c), None)
-            ticker_col = next((c for c in df.columns if 'ticker' in c), 'ticker')
+            # זיהוי עמודות (גמיש מאוד)
+            ticker_col = next((c for c in df.columns if 'Ticker' in str(c)), 'Ticker')
+            sel_col = next((c for c in df.columns if 'Final' in str(c) or 'Selection' in str(c)), None)
             
             if sel_col:
+                # חיפוש Anchor, Turbo, Top 5
                 mask = df[sel_col].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
                 filtered = df[mask]
                 for _, row in filtered.iterrows():
                     t = str(row[ticker_col]).strip().upper()
                     watchlist[t] = str(row[sel_col])
-                logs.append(f"✅ {prefix}: Found {len(filtered)}")
+                logs.append(f"✅ {prefix}: Found {len(filtered)} items")
             else:
-                logs.append(f"⚠️ {prefix}: Col Selection missing")
+                logs.append(f"⚠️ {prefix}: Selection column not found")
         else:
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# --- 2. ביצועי פורטפוליו (Day% מ-16:30 / Wk% מיום שני 17:00) ---
+# --- 2. ביצועי פורטפוליו (Day% מ-Open היום / Wk% מ-Open שבועי) ---
 def get_portfolio_performance(watchlist):
-    if not watchlist: return "⚠️ Watchlist empty - Check CSV labels.\n"
+    if not watchlist: return "⚠️ Watchlist empty - Check CSV content.\n"
     
     now_isr = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
-    days_to_mon = now_isr.weekday()
-    mon_date = (now_isr - datetime.timedelta(days=days_to_mon)).date()
+    # יום שני האחרון
+    monday_date = (now_isr - datetime.timedelta(days=now_isr.weekday())).strftime('%Y-%m-%d')
     
-    report = "📈 *WTC Portfolio Watch*\n"
+    report = "📈 *WTC Portfolio Watch (Anchor & Turbo)*\n"
     report += "`Ticker | Price | Day% | Wk%  | Status`\n"
     report += "`---------------------------------------`\n"
     
     for t in watchlist.keys():
         try:
-            # הורדת נתונים מיום שני בנרות של שעה (יציב יותר)
-            data = yf.download(t, start=mon_date.strftime('%Y-%m-%d'), interval="1h", progress=False)
+            # הורדת דאטה שבועי (יומי מספיק לחישוב פתיחת שבוע ופתיחת יום)
+            data = yf.download(t, start=monday_date, interval="1d", progress=False)
             if data.empty: continue
             
-            curr_p = data['Close'].iloc[-1]
+            curr_p = yf.Ticker(t).fast_info['lastPrice'] # מחיר זמן אמת מדויק
             
-            # Wk% - מה-Open הראשון של יום שני
+            # Day% - שינוי מפתיחת היום
+            day_open = data['Open'].iloc[-1]
+            day_chg = ((curr_p / day_open) - 1) * 100
+            
+            # Wk% - שינוי מפתיחת השבוע (יום שני)
             wk_open = data['Open'].iloc[0]
             wk_chg = ((curr_p / wk_open) - 1) * 100
             
-            # Day% - מה-Open של היום (16:30 ישראל)
-            today_data = data[data.index.date == now_isr.date()]
-            day_open = today_data['Open'].iloc[0] if not today_data.empty else wk_open
-            day_chg = ((curr_p / day_open) - 1) * 100
-            
-            # Status - בדיקה מול גבוה הבוקר (באמצעות דאטה של 5 דק')
+            # Status - בדיקה מול גבוה הבוקר (נשתמש ב-5 דקות לדיוק)
             d5 = yf.download(t, period="1d", interval="5m", progress=False)
             o_high = d5.iloc[:6]['High'].max() if len(d5) >= 6 else curr_p
             status = "✅ Brk" if curr_p >= o_high else "❌ Bel"
             
             report += f"`{t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
-        except Exception:
-            report += f"`{t:<5} |  N/A   |  N/A  |  N/A  | Error`\n"
+        except:
+            report += f"`{t:<5} | Error | N/A  | N/A  | --`\n"
             continue
             
     return report + "`---------------------------------------`\n"
 
-# --- 3. ניתוח AI מוסדי ---
+# --- 3. ניתוח AI גולדמן סאקס ---
 def get_ai_report(custom_prompt=None):
     try:
         news = ""
@@ -128,13 +126,13 @@ def get_ai_report(custom_prompt=None):
         return client.models.generate_content(model=target, contents=p).text
     except: return "⚠️ AI Summary Unavailable"
 
-# --- 4. סריקת פריצות וסיכום טכני ---
+# --- 4. סריקה וסיכום טכני ---
 def run_execution_scan(service):
     res = {"STOCKS": [], "ETF": []}
     for pref, label in {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}.items():
         df, _ = download_latest_file(service, pref)
         if df is not None:
-            t_col = next((c for c in df.columns if 'ticker' in str(c).lower()), 'ticker')
+            t_col = next((c for c in df.columns if 'Ticker' in str(c)), 'Ticker')
             for _, row in df.iterrows():
                 t = str(row.get(t_col, '')).strip()
                 try:
@@ -145,10 +143,7 @@ def run_execution_scan(service):
     
     vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
     report = f"🎯 *Execution Scan Result:*\n🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
-    if not res["STOCKS"] and not res["ETF"]:
-        report += "💡 *סיכום טכני:* השוק בדשדוש; אין פריצות מעל גבוה הבוקר. " + ("להמתין ל-VIX." if vix > 22 else "")
-    else:
-        report += f"🚀 *סיכום טכני:* זוהו פריצות מומנטום ב-{len(res['STOCKS']) + len(res['ETF'])} נכסים."
+    report += "💡 *סיכום טכני:* " + ("השוק בלחץ; להמתין ל-VIX." if vix > 22 else "אין פריצות; השוק בדשדוש.") if not res["STOCKS"] else "🚀 זוהו פריצות מומנטום."
     return report
 
 # --- MAIN ---
@@ -172,11 +167,11 @@ def main():
         send_telegram_msg(run_execution_scan(service))
         return
 
-    if hour == 16:
+    if hour == 16: # פתיחה
         send_telegram_msg(f"{header}\n{get_ai_report()}")
-    elif 17 <= hour < 23:
+    elif 17 <= hour < 23: # זמן מסחר
         send_telegram_msg(f"{header}\n{perf}\n{run_execution_scan(service)}")
-    elif hour == 23:
+    elif hour == 23: # נעילה
         send_telegram_msg(f"{header}🌙 *Closing Summary*\n\n{get_ai_report('סכם את יום המסחר.')}")
 
 if __name__ == "__main__":
