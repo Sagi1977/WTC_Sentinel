@@ -204,41 +204,100 @@ def get_ai_report(custom_prompt=None):
 #  4. סריקת פריצות — Status = Break מה-watchlist
 # ═══════════════════════════════════════════════════
 
-def run_execution_scan(watchlist):
+def build_underdog_list(service):
     """
-    מדווח על מניות שה-Wk% שלהן חיובי (Status = Break).
-    משתמש באותו עוגן שבועי בדיוק כמו הטבלה.
+    מחזיר רשימה של (ticker, bucket) עבור כל נכס שאינו Anchor/Turbo/Top 5.
+    אלה ה-Underdogs: מועמדים מתחת לרדאר.
     """
-    res = {"STOCKS": [], "ETF": []}
-    for t, label in watchlist.items():
-        category = "ETF" if "Top 5 E" in label or "ETF" in label.upper() else "STOCKS"
+    underdogs = []
+    for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
+        df, status = download_latest_file(service, prefix)
+        if df is None:
+            continue
+        clean  = {c: re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() for c in df.columns}
+        df     = df.rename(columns=clean)
+        sel    = next((c for c in df.columns if 'final' in c or 'selection' in c), None)
+        tcol   = next((c for c in df.columns if 'ticker' in c), 'ticker')
+        if not sel or tcol not in df.columns:
+            continue
+        mask = ~df[sel].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
+        for _, row in df[mask].iterrows():
+            t = str(row[tcol]).strip().upper()
+            if t:
+                underdogs.append((t, bucket))
+    return underdogs
+
+
+def run_execution_scan(service):
+    """
+    Execution Scan — Underdogs בלבד:
+    סורק נכסים שלא נבחרו ל-watchlist (לא Anchor/Turbo/Top 5).
+    מדווח רק על נכסים עם Wk% > +5%.
+    ממוין לפי Wk% יורד.
+    """
+    underdogs = build_underdog_list(service)
+    res       = {"STOCKS": [], "ETF": []}
+
+    for t, bucket in underdogs:
         try:
             d5_today = get_5m_rth(t, period='1d')
             close_s  = extract_col(d5_today, 'Close')
-            if close_s is None or close_s.empty: continue
-            curr_p  = float(close_s.iloc[-1])
-            wk_open = get_monday_10am_open(t)
+            if close_s is None or close_s.empty:
+                continue
+            curr_p   = float(close_s.iloc[-1])
+
+            # Day%
+            day_open = find_open_at_or_after(d5_today, 9, 30)
+            if day_open is None: day_open = curr_p
+            day_chg  = ((curr_p / day_open) - 1) * 100
+
+            # Wk%
+            wk_open  = get_monday_10am_open(t)
             if wk_open is None: continue
-            if curr_p >= wk_open:
-                res[category].append(t)
+            wk_chg   = ((curr_p / wk_open) - 1) * 100
+
+            # קריטריון: Wk% > +5% בלבד
+            if wk_chg > 5:
+                res[bucket].append((t, curr_p, day_chg, wk_chg))
         except:
             continue
 
+    # מיון לפי Wk% יורד
+    res['STOCKS'].sort(key=lambda x: x[3], reverse=True)
+    res['ETF'].sort(key=lambda x:    x[3], reverse=True)
+
     vix    = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
-    report = "🎯 *Execution Scan Result:*\n"
-    report += f"🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n"
-    report += f"🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
-    if not res["STOCKS"] and not res["ETF"]:
-        report += "💡 *סיכום טכני:* אין נכסים מעל עוגן השבוע."
+    total  = len(res['STOCKS']) + len(res['ETF'])
+
+    report  = "🎯 *Execution Scan — UnderRadar*\n"
+    report += "`-----------------------------`\n\n"
+
+    report += "🥇 *STOCKS:*\n"
+    if res['STOCKS']:
+        report += "`Ticker | Price  | Day%  | Wk%`\n"
+        report += "`-------------------------------`\n"
+        for t, p, d, w in res['STOCKS']:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}%`\n"
+    else:
+        report += "_None_\n"
+
+    report += "\n🏅 *ETF:*\n"
+    if res['ETF']:
+        report += "`Ticker | Price  | Day%  | Wk%`\n"
+        report += "`-------------------------------`\n"
+        for t, p, d, w in res['ETF']:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}%`\n"
+    else:
+        report += "_None_\n"
+
+    report += "\n"
+    if total == 0:
+        report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
         if vix > 22: report += " VIX גבוה — זהירות."
     else:
-        total   = len(res['STOCKS']) + len(res['ETF'])
-        report += f"🚀 *סיכום טכני:* {total} נכסים מעל עוגן שבוע המסחר."
+        report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
     return report
 
-# ═══════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════
 
 def main():
     service   = get_drive_service()
@@ -274,13 +333,13 @@ def main():
     if is_manual:
         send_telegram_msg(f"{header}\n{perf}")
         send_telegram_msg(get_ai_report())
-        send_telegram_msg(run_execution_scan(watchlist))
+        send_telegram_msg(run_execution_scan(service))
         return
 
     if hour == 16:
         send_telegram_msg(f"{header}\n{get_ai_report()}")
     elif 17 <= hour < 23:
-        send_telegram_msg(f"{header}\n{perf}\n{run_execution_scan(watchlist)}")
+        send_telegram_msg(f"{header}\n{perf}\n{run_execution_scan(service)}")
     elif hour == 23:
         send_telegram_msg(f"{header}🌙 *Closing Summary*\n\n{get_ai_report('סכם את יום המסחר.')}")
 
