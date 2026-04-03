@@ -3,7 +3,8 @@ import datetime
 import time
 import pandas as pd
 import yfinance as yf
-import requests
+import re
+import pytzquests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google import genai
@@ -303,8 +304,10 @@ def run_execution_scan(service):
 
 def main():
     service   = get_drive_service()
-    now       = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    isr_tz    = pytz.timezone('Asia/Jerusalem')
+    now       = datetime.datetime.now(datetime.timezone.utc).astimezone(isr_tz)
     hour      = now.hour
+    minute    = now.minute
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
@@ -338,10 +341,18 @@ def main():
         send_telegram_msg(run_execution_scan(service))
         return
 
+    # חלון 16:00-16:59 ישראל → AI Report בוקר
     if hour == 16:
         send_telegram_msg(f"{header}\n{get_ai_report()}")
-    elif 17 <= hour < 23:
-        send_telegram_msg(f"{header}\n{perf}\n{run_execution_scan(service)}")
+
+    # חלון 17:00-20:59 ישראל → Portfolio Watch + Execution Scan
+    # נשלח פעם אחת בלבד לאחר 17:05 (מונע כפילות בריצות מרובות)
+    elif 17 <= hour <= 20:
+        if minute <= 10:  # רק בריצה הראשונה של כל שעה
+            send_telegram_msg(f"{header}\n{perf}")
+            send_telegram_msg(run_execution_scan(service))
+
+    # חלון 23:00 ישראל → Closing Summary
     elif hour == 23:
         send_telegram_msg(f"{header}🌙 *Closing Summary*\n\n{get_ai_report('סכם את יום המסחר.')}")
 
