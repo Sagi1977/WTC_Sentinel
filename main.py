@@ -4,13 +4,13 @@ import time
 import pandas as pd
 import yfinance as yf
 import re
-import pytzquests
+import pytz
+import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google import genai
 import google.auth
 import io
-import re
 
 TOKEN      = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID    = os.environ.get('TELEGRAM_CHAT_ID')
