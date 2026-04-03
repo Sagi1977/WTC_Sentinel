@@ -5,12 +5,12 @@ import pandas as pd
 import yfinance as yf
 import requests
 import pytz
+import re
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google import genai
 import google.auth
 import io
-import re
 
 TOKEN    = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID  = os.environ.get('TELEGRAM_CHAT_ID')
@@ -31,24 +31,28 @@ def get_drive_service():
 
 def download_latest_file(service, prefix):
     try:
-        query = f"name contains '{prefix}' and mimeType = 'text/csv'"
+        query = f"name contains '{prefix}'"
         res = service.files().list(q=query, orderBy="createdTime desc").execute()
         files = res.get("files", [])
-        if not files: return None, "Missing"
+        if not files: return None, f"❓ Missing"
         fh = io.BytesIO()
         MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]["id"])).next_chunk()
         fh.seek(0)
-        df = pd.read_csv(fh)
-        df.columns = [c.strip().capitalize() for c in df.columns]
-        return df, "Success"
-    except: return None, "Error"
+        return pd.read_csv(fh, encoding="utf-8-sig", engine="python"), "Loaded"
+    except Exception as e:
+        return None, f"Err: {str(e)[:30]}"
 
+# ─── extract_col: מחזיר Series תמיד (squeeze מונע DataFrame) ─────
 def extract_col(df, col_name):
     if df is None or df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        lvl = df.columns.get_level_values(0)
-        return df[col_name].iloc[:, 0] if col_name in lvl else None
-    return df[col_name] if col_name in df.columns else None
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            lvl = df.columns.get_level_values(0)
+            if col_name not in lvl: return None
+            result = df[col_name]
+            return result.squeeze() if isinstance(result, pd.DataFrame) else result
+        return df[col_name] if col_name in df.columns else None
+    except: return None
 
 def filter_rth(df):
     if df is None or df.empty: return df
@@ -90,24 +94,24 @@ def get_monday_10am_open(ticker):
 def build_dynamic_watchlist(service):
     watchlist, logs = {}, []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
-        df, _ = download_latest_file(service, prefix)
+        df, status = download_latest_file(service, prefix)
         if df is not None:
-            target_col = next((c for c in df.columns if "Final" in c), None)
-            if target_col:
-                filtered = df[df[target_col].str.contains("Anchor|Turbo|Top 5", na=False, case=False)]
-                for _, row in filtered.iterrows():
-                    watchlist[str(row["Ticker"]).strip()] = {
-                        "type": str(row[target_col]).split("(")[0].strip(),
-                        "score": row.get("Score", 0)
-                    }
-                logs.append(f"✅ {prefix}: Found {len(filtered)}")
+            clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
+            df = df.rename(columns=clean)
+            sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
+            tcol = next((c for c in df.columns if "ticker" in c), "ticker")
+            if sel:
+                mask = df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
+                for _, row in df[mask].iterrows():
+                    watchlist[str(row[tcol]).strip().upper()] = str(row[sel])
+                logs.append(f"✅ {prefix}: Found {mask.sum()}")
             else:
                 logs.append(f"⚠️ {prefix}: Col missing")
         else:
-            logs.append(f"❌ {prefix}: Error")
+            logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# ─── 2. Dashboard — SPY Day% vs Open 09:30 ET ────────────────────
+# ─── 2. Dashboard ─────────────────────────────────────────────────
 def get_market_dashboard():
     try:
         spy_5m  = get_5m_rth("SPY", period="1d")
@@ -128,17 +132,17 @@ def get_market_dashboard():
     except: return "⚠️ Dashboard Offline\n\n"
 
 # ─── 3. Portfolio — Day% ו-Wk% ───────────────────────────────────
-def get_portfolio_snapshot(watchlist):
-    if not watchlist: return "⚠️ לא נמצאו נכסי מפתח בקבצים.\n"
+def get_portfolio_performance(watchlist):
+    if not watchlist: return "⚠️ Watchlist empty\n"
     report  = "📈 *My Portfolio Watch (Dynamic)*\n"
     report += "`Type       | Ticker | Price  | Day%  | Wk%   | Status`\n"
     report += "`--------------------------------------------------`\n"
-    for t, info in watchlist.items():
+    for t, label in watchlist.items():
         try:
-            d5      = get_5m_rth(t, period="1d")
-            cls_s   = extract_col(d5, "Close")
+            d5       = get_5m_rth(t, period="1d")
+            cls_s    = extract_col(d5, "Close")
             if cls_s is None or cls_s.empty:
-                report += f"`{info['type'][:8]:<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️`\n"
+                report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️`\n"
                 continue
             curr_p   = float(cls_s.iloc[-1])
             day_open = find_open_at_or_after(d5, 9, 30)
@@ -148,8 +152,9 @@ def get_portfolio_snapshot(watchlist):
             if wk_open is None: wk_open = day_open
             wk_chg   = ((curr_p / wk_open) - 1) * 100
             status   = "✅ Break" if wk_chg >= 0 else "❌ Below"
+            lbl      = (label[:7] + ".") if len(label) > 8 else label[:8]
             report  += (
-                f"`{info['type'][:8]:<8} | {t:<5} | {curr_p:>6.2f} | "
+                f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
                 f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
             )
         except:
@@ -175,36 +180,82 @@ def get_ai_report(custom_prompt=None):
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if "flash" in m.name), "gemini-1.5-flash")
         return client.models.generate_content(model=target, contents=prompt).text
-    except: return "⚠️ שגיאת AI בניתוח."
+    except: return "⚠️ AI Summary Unavailable"
 
-# ─── 5. Execution Scan ────────────────────────────────────────────
+# ─── 5. UnderDogs — רשימת נכסים שאינם Anchor/Turbo/Top 5 ─────────
+def build_underdog_list(service):
+    underdogs = []
+    for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
+        df, _ = download_latest_file(service, prefix)
+        if df is None: continue
+        clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
+        df = df.rename(columns=clean)
+        sel  = next((c for c in df.columns if "final" in c or "selection" in c), None)
+        tcol = next((c for c in df.columns if "ticker" in c), "ticker")
+        scol = next((c for c in df.columns if "score" in c), None)
+        if not sel or tcol not in df.columns: continue
+        mask = ~df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
+        for _, row in df[mask].iterrows():
+            t     = str(row[tcol]).strip().upper()
+            score = row.get(scol, "N/A") if scol else "N/A"
+            if t: underdogs.append((t, bucket, score))
+    return underdogs
+
+# ─── 6. Execution Scan — UnderRadar (פורמט מקורי + squeeze תיקון) ─
 def run_execution_scan(service):
-    results = {"STOCKS": [], "ETF": []}
-    log     = ""
-    mapping = {"Golden_Plan_STOCKS": "STOCKS", "Golden_Plan_ETF": "ETF"}
-    for prefix, label in mapping.items():
-        df, status = download_latest_file(service, prefix)
-        log += f"{prefix}: {status}\n"
-        if df is not None and "Ticker" in df.columns:
-            for _, row in df.iterrows():
-                t, s = str(row["Ticker"]).strip(), row.get("Score", 0)
-                try:
-                    d   = yf.download(t, period="1d", interval="5m", progress=False)
-                    d   = filter_rth(d)
-                    if d is None or len(d) < 7: continue
-                    cls = extract_col(d, "Close")
-                    hi  = extract_col(d, "High")
-                    if cls is None or hi is None: continue
-                    if float(cls.iloc[-1]) > float(hi.iloc[:6].max()):
-                        results[label].append(f"{t}({s})")
-                except: continue
-    res_msg  = f"🎯 *WTC Execution Scan Result:*\n{log}\n"
-    res_msg += f"🥇 *STOCKS Gold:* {', '.join(results['STOCKS']) or 'None'}\n"
-    res_msg += f"🏅 *ETF Gold:*    {', '.join(results['ETF'])    or 'None'}\n\n"
-    if not results["STOCKS"] and not results["ETF"]:
-        v_val    = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-        res_msg += "💡 *סטטוס:* השוק בלחץ; נסחרים מתחת לגבוה היומי." if v_val > 22 else "💡 *סטטוס:* חוסר מומנטום בפריצות."
-    return res_msg
+    underdogs = build_underdog_list(service)
+    res = {"STOCKS": [], "ETF": []}
+
+    for t, bucket, score in underdogs:
+        try:
+            d5    = get_5m_rth(t, period="1d")
+            cls_s = extract_col(d5, "Close")   # squeeze מובנה ב-extract_col
+            if cls_s is None or len(cls_s) < 7: continue
+            curr_p   = float(cls_s.iloc[-1])
+            day_open = find_open_at_or_after(d5, 9, 30)
+            if day_open is None: day_open = curr_p
+            day_chg  = ((curr_p / day_open) - 1) * 100
+            wk_open  = get_monday_10am_open(t)
+            if wk_open is None: continue
+            wk_chg   = ((curr_p / wk_open) - 1) * 100
+            if wk_chg > 5:
+                res[bucket].append((t, curr_p, day_chg, wk_chg, score))
+        except: continue
+
+    res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
+    res["ETF"].sort(key=lambda x: x[3], reverse=True)
+
+    total  = len(res["STOCKS"]) + len(res["ETF"])
+    v_p    = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+
+    report  = "🎯 *Execution Scan — UnderRadar*\n"
+    report += "`-----------------------------`\n\n"
+
+    report += "🥇 *STOCKS:*\n"
+    if res["STOCKS"]:
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res["STOCKS"]:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
+    else:
+        report += "_None_\n"
+
+    report += "\n🏅 *ETF:*\n"
+    if res["ETF"]:
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res["ETF"]:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
+    else:
+        report += "_None_\n"
+
+    report += "\n"
+    if total == 0:
+        report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
+        if v_p > 22: report += " VIX גבוה — זהירות."
+    else:
+        report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
+    return report
 
 # ─── MAIN ──────────────────────────────────────────────────────────
 def main():
@@ -217,7 +268,7 @@ def main():
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
     db        = get_market_dashboard()
-    portfolio = get_portfolio_snapshot(watchlist)
+    portfolio = get_portfolio_performance(watchlist)
     db       += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
 
     if is_manual:
