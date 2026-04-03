@@ -34,7 +34,7 @@ def download_latest_file(service, prefix):
         query = f"name contains '{prefix}'"
         res = service.files().list(q=query, orderBy="createdTime desc").execute()
         files = res.get("files", [])
-        if not files: return None, f"❓ Missing"
+        if not files: return None, "❓ Missing"
         fh = io.BytesIO()
         MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]["id"])).next_chunk()
         fh.seek(0)
@@ -42,7 +42,7 @@ def download_latest_file(service, prefix):
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
-# ─── extract_col: מחזיר Series תמיד (squeeze מונע DataFrame) ─────
+# ─── extract_col: תמיד Series (squeeze מונע DataFrame) ───────────
 def extract_col(df, col_name):
     if df is None or df.empty: return None
     try:
@@ -98,7 +98,7 @@ def build_dynamic_watchlist(service):
         if df is not None:
             clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
             df = df.rename(columns=clean)
-            sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
+            sel  = next((c for c in df.columns if "final" in c or "selection" in c), None)
             tcol = next((c for c in df.columns if "ticker" in c), "ticker")
             if sel:
                 mask = df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
@@ -111,14 +111,15 @@ def build_dynamic_watchlist(service):
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# ─── 2. Dashboard ─────────────────────────────────────────────────
+# ─── 2. Dashboard — SPY Day% = Close אתמול vs Close היום ─────────
+# בדיוק כמו כל אתר פיננסי (Yahoo, Bloomberg וכו')
 def get_market_dashboard():
     try:
-        spy_5m  = get_5m_rth("SPY", period="1d")
-        spy_cls = extract_col(spy_5m, "Close")
+        spy_2d  = yf.download("SPY", period="2d", interval="1d", progress=False)
+        spy_cls = extract_col(spy_2d, "Close")
         s_p     = float(spy_cls.iloc[-1])
-        spy_opn = find_open_at_or_after(spy_5m, 9, 30)
-        s_c     = ((s_p / spy_opn) - 1) * 100 if spy_opn else 0.0
+        prev_c  = float(spy_cls.iloc[-2])
+        s_c     = ((s_p / prev_c) - 1) * 100      # ✅ Close אתמול → Close היום
         v_p     = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
         status  = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji   = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
@@ -131,7 +132,7 @@ def get_market_dashboard():
         )
     except: return "⚠️ Dashboard Offline\n\n"
 
-# ─── 3. Portfolio — Day% ו-Wk% ───────────────────────────────────
+# ─── 3. Portfolio — Day% = Close אתמול | Wk% = Open שני 10:00 ───
 def get_portfolio_performance(watchlist):
     if not watchlist: return "⚠️ Watchlist empty\n"
     report  = "📈 *My Portfolio Watch (Dynamic)*\n"
@@ -139,18 +140,21 @@ def get_portfolio_performance(watchlist):
     report += "`--------------------------------------------------`\n"
     for t, label in watchlist.items():
         try:
-            d5       = get_5m_rth(t, period="1d")
-            cls_s    = extract_col(d5, "Close")
-            if cls_s is None or cls_s.empty:
+            # Close היום
+            d2       = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2   = extract_col(d2, "Close")
+            if cls_d2 is None or len(cls_d2) < 2:
                 report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️`\n"
                 continue
-            curr_p   = float(cls_s.iloc[-1])
-            day_open = find_open_at_or_after(d5, 9, 30)
-            if day_open is None: day_open = curr_p
-            day_chg  = ((curr_p / day_open) - 1) * 100
+            curr_p   = float(cls_d2.iloc[-1])
+            prev_p   = float(cls_d2.iloc[-2])
+            day_chg  = ((curr_p / prev_p) - 1) * 100    # ✅ Close אתמול → Close היום
+
+            # Wk% = Open 10:00 ET יום שני → Close היום
             wk_open  = get_monday_10am_open(t)
-            if wk_open is None: wk_open = day_open
+            if wk_open is None: wk_open = prev_p
             wk_chg   = ((curr_p / wk_open) - 1) * 100
+
             status   = "✅ Break" if wk_chg >= 0 else "❌ Below"
             lbl      = (label[:7] + ".") if len(label) > 8 else label[:8]
             report  += (
@@ -182,7 +186,7 @@ def get_ai_report(custom_prompt=None):
         return client.models.generate_content(model=target, contents=prompt).text
     except: return "⚠️ AI Summary Unavailable"
 
-# ─── 5. UnderDogs — רשימת נכסים שאינם Anchor/Turbo/Top 5 ─────────
+# ─── 5. UnderDogs רשימה ───────────────────────────────────────────
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
@@ -201,23 +205,22 @@ def build_underdog_list(service):
             if t: underdogs.append((t, bucket, score))
     return underdogs
 
-# ─── 6. Execution Scan — UnderRadar (פורמט מקורי + squeeze תיקון) ─
+# ─── 6. Execution Scan — UnderRadar ──────────────────────────────
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
     res = {"STOCKS": [], "ETF": []}
 
     for t, bucket, score in underdogs:
         try:
-            d5    = get_5m_rth(t, period="1d")
-            cls_s = extract_col(d5, "Close")   # squeeze מובנה ב-extract_col
-            if cls_s is None or len(cls_s) < 7: continue
-            curr_p   = float(cls_s.iloc[-1])
-            day_open = find_open_at_or_after(d5, 9, 30)
-            if day_open is None: day_open = curr_p
-            day_chg  = ((curr_p / day_open) - 1) * 100
-            wk_open  = get_monday_10am_open(t)
+            d2    = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2 = extract_col(d2, "Close")
+            if cls_d2 is None or len(cls_d2) < 2: continue
+            curr_p  = float(cls_d2.iloc[-1])
+            prev_p  = float(cls_d2.iloc[-2])
+            day_chg = ((curr_p / prev_p) - 1) * 100
+            wk_open = get_monday_10am_open(t)
             if wk_open is None: continue
-            wk_chg   = ((curr_p / wk_open) - 1) * 100
+            wk_chg  = ((curr_p / wk_open) - 1) * 100
             if wk_chg > 5:
                 res[bucket].append((t, curr_p, day_chg, wk_chg, score))
         except: continue
@@ -225,8 +228,8 @@ def run_execution_scan(service):
     res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
     res["ETF"].sort(key=lambda x: x[3], reverse=True)
 
-    total  = len(res["STOCKS"]) + len(res["ETF"])
-    v_p    = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+    total = len(res["STOCKS"]) + len(res["ETF"])
+    v_p   = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
 
     report  = "🎯 *Execution Scan — UnderRadar*\n"
     report += "`-----------------------------`\n\n"
