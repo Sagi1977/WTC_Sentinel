@@ -29,19 +29,6 @@ def get_updates(offset=None):
     except Exception:
         return []
 
-def clear_pending():
-    try:
-        r = requests.get(f"{BASE}/getUpdates", params={"timeout": 0, "offset": -1}, timeout=10)
-        results = r.json().get("result", [])
-        if results:
-            last_id = results[-1]["update_id"]
-            requests.get(f"{BASE}/getUpdates", params={"timeout": 0, "offset": last_id + 1}, timeout=10)
-            print(f"Cleared {len(results)} pending updates, last_id={last_id}")
-            return last_id + 1
-    except Exception as e:
-        print(f"clear_pending error: {e}")
-    return None
-
 def run_report():
     send_msg("⏳ *מריץ דוח מלא... 30-60 שניות...*")
     try:
@@ -62,22 +49,29 @@ def run_report():
 
 def main():
     print(f"Bot starting — CHAT_ID={CHAT_ID}")
-    offset = clear_pending()
-    print(f"Starting offset={offset}")
+
+    # offset=None — קורא את כל ההודעות הממתינות ומעבד אותן
+    offset = None
     deadline = time.time() + 45
 
     while time.time() < deadline:
         if deadline - time.time() < 5:
             break
+
         updates = get_updates(offset)
+
         for upd in updates:
             offset = upd["update_id"] + 1
             msg     = upd.get("message", {})
             text    = msg.get("text", "").strip().lower()
             chat_id = str(msg.get("chat", {}).get("id", ""))
-            print(f"chat_id={chat_id} text={text!r}")
+
+            print(f"Received: chat_id={chat_id} text={text!r}")
+
             if chat_id != CHAT_ID:
+                print(f"Ignored unknown chat_id={chat_id}")
                 continue
+
             if text in ("/start", "/report", "/דוח", "start", "report"):
                 run_report()
             elif text in ("/help", "help"):
