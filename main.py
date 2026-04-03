@@ -11,19 +11,19 @@ import google.auth
 import io
 import re
 
-TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TOKEN      = os.environ.get('TELEGRAM_TOKEN')
+CHAT_ID    = os.environ.get('TELEGRAM_CHAT_ID')
 GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 
-ET_TZ = 'America/New_York'
-ISR_TZ_OFFSET = 3
+# ═══════════════════════════════════════════════════
+#  פונקציות עזר
+# ═══════════════════════════════════════════════════
 
 def send_telegram_msg(text):
-    if not text:
-        return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    if not text: return
+    url     = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text[:4000], "parse_mode": "Markdown"}
-    res = requests.post(url, json=payload)
+    res     = requests.post(url, json=payload)
     if res.status_code != 200:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
     time.sleep(1.2)
@@ -35,112 +35,104 @@ def get_drive_service():
 def download_latest_file(service, prefix):
     try:
         query = f"name contains '{prefix}'"
-        res = service.files().list(q=query, orderBy="createdTime desc").execute()
+        res   = service.files().list(q=query, orderBy="createdTime desc").execute()
         files = res.get('files', [])
-        if not files:
-            return None, f"❓ {prefix} Missing"
-        file_id = files[0]['id']
-        req = service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        MediaIoBaseDownload(fh, req).next_chunk()
+        if not files: return None, f"❓ {prefix} Missing"
+        fh  = io.BytesIO()
+        MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]['id'])).next_chunk()
         fh.seek(0)
-        df = pd.read_csv(fh, encoding='utf-8-sig', engine='python')
-        return df, "Loaded"
+        return pd.read_csv(fh, encoding='utf-8-sig', engine='python'), "Loaded"
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
 def extract_col(df, col_name):
-    if df is None or df.empty:
-        return None
+    """תמיכה ב-MultiIndex (yfinance >= 0.2.x) וגם index רגיל."""
+    if df is None or df.empty: return None
     if isinstance(df.columns, pd.MultiIndex):
-        level0 = df.columns.get_level_values(0)
-        if col_name in level0:
-            return df[col_name].iloc[:, 0]
-        return None
+        lvl = df.columns.get_level_values(0)
+        return df[col_name].iloc[:, 0] if col_name in lvl else None
     return df[col_name] if col_name in df.columns else None
 
 def filter_rth(df):
-    if df is None or df.empty:
-        return df
+    """מסנן נרות RTH בלבד: 09:30–16:00 ET. מונע פרי/אפטר-מרקט."""
+    if df is None or df.empty: return df
     try:
-        idx = df.index
-        et_idx = idx.tz_convert(ET_TZ) if (hasattr(idx, 'tz') and idx.tz is not None) else idx
-        mask = (((et_idx.hour == 9) & (et_idx.minute >= 30)) | ((et_idx.hour > 9) & (et_idx.hour < 16)))
+        idx    = df.index
+        et_idx = idx.tz_convert('America/New_York') if (hasattr(idx, 'tz') and idx.tz) else idx
+        mask   = (((et_idx.hour == 9) & (et_idx.minute >= 30)) |
+                  ((et_idx.hour > 9)  & (et_idx.hour < 16)))
         return df[mask]
     except Exception:
         return df
 
-def get_et_index(df):
-    if df is None or df.empty:
+def get_5m_rth(ticker, period='1d'):
+    """מוריד נרות 5 דקות ומסנן RTH."""
+    try:
+        raw = yf.download(ticker, period=period, interval='5m', progress=False)
+        return filter_rth(raw)
+    except Exception:
         return None
-    idx = df.index
-    return idx.tz_convert(ET_TZ) if (hasattr(idx, 'tz') and idx.tz is not None) else idx
 
-def find_bar_value_at_or_after(df, col_name, target_hour, target_minute):
-    if df is None or df.empty:
-        return None
-    series = extract_col(df, col_name)
-    if series is None or series.empty:
-        return None
-    et_idx = get_et_index(df)
+def find_open_at_or_after(df, target_hour, target_minute):
+    """
+    מחזיר את ערך ה-Open של הנר הראשון שמגיע ב-target_hour:target_minute ET או אחריו.
+    """
+    if df is None or df.empty: return None
+    open_s = extract_col(df, 'Open')
+    if open_s is None or open_s.empty: return None
+    idx    = df.index
+    et_idx = idx.tz_convert('America/New_York') if (hasattr(idx, 'tz') and idx.tz) else idx
     for i, ts in enumerate(et_idx):
         if ts.hour > target_hour or (ts.hour == target_hour and ts.minute >= target_minute):
-            return float(series.iloc[i])
+            return float(open_s.iloc[i])
     return None
 
-def get_today_rth_5m(ticker):
+def get_monday_10am_open(ticker):
+    """
+    Open 10:00 ET של יום שני — עוגן שבועי.
+    מוריד 5 ימים של נרות 5 דקות RTH, מאתר את יום שני ולוקח את נר 10:00.
+    """
     try:
-        d5 = yf.download(ticker, period="1d", interval="5m", progress=False)
-        return filter_rth(d5)
+        df = get_5m_rth(ticker, period='5d')
+        if df is None or df.empty: return None
+        et_idx        = df.index.tz_convert('America/New_York') if (hasattr(df.index, 'tz') and df.index.tz) else df.index
+        monday_mask   = [ts.weekday() == 0 for ts in et_idx]
+        monday_df     = df[monday_mask]
+        return find_open_at_or_after(monday_df, 10, 0)
     except Exception:
         return None
 
-def get_multi_day_rth_5m(ticker, days='5d'):
-    try:
-        d5 = yf.download(ticker, period=days, interval="5m", progress=False)
-        return filter_rth(d5)
-    except Exception:
-        return None
-
-def get_current_price_from_today(d5_rth):
-    close_s = extract_col(d5_rth, 'Close')
-    if close_s is None or close_s.empty:
-        return None
-    return float(close_s.iloc[-1])
-
-def get_week_anchor_open_10am(ticker):
-    d5 = get_multi_day_rth_5m(ticker, '5d')
-    if d5 is None or d5.empty:
-        return None
-    et_idx = get_et_index(d5)
-    monday_positions = [i for i, ts in enumerate(et_idx) if ts.weekday() == 0]
-    if not monday_positions:
-        return None
-    monday_df = d5.iloc[monday_positions]
-    return find_bar_value_at_or_after(monday_df, 'Open', 10, 0)
+# ═══════════════════════════════════════════════════
+#  1. בניית רשימה דינמית מ-Drive
+# ═══════════════════════════════════════════════════
 
 def build_dynamic_watchlist(service):
-    watchlist = {}
-    logs = []
+    watchlist, logs = {}, []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is not None:
-            clean_cols = {c: re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() for c in df.columns}
-            df = df.rename(columns=clean_cols)
-            sel_col = next((c for c in df.columns if 'final' in c or 'selection' in c), None)
-            ticker_col = next((c for c in df.columns if 'ticker' in c), 'ticker')
-            if sel_col:
-                mask = df[sel_col].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
-                filtered = df[mask]
-                for _, row in filtered.iterrows():
-                    t = str(row[ticker_col]).strip().upper()
-                    watchlist[t] = str(row[sel_col])
-                logs.append(f"✅ {prefix}: Found {len(filtered)}")
+            clean = {c: re.sub(r'[^a-zA-Z0-9]', '', str(c)).lower() for c in df.columns}
+            df    = df.rename(columns=clean)
+            sel   = next((c for c in df.columns if 'final' in c or 'selection' in c), None)
+            tcol  = next((c for c in df.columns if 'ticker' in c), 'ticker')
+            if sel:
+                mask = df[sel].astype(str).str.contains('Anchor|Turbo|Top 5', na=False, case=False)
+                for _, row in df[mask].iterrows():
+                    watchlist[str(row[tcol]).strip().upper()] = str(row[sel])
+                logs.append(f"✅ {prefix}: Found {mask.sum()}")
             else:
                 logs.append(f"⚠️ {prefix}: Col Selection missing")
         else:
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
+
+# ═══════════════════════════════════════════════════
+#  2. טבלת פורטפוליו
+#
+#  Day%   = curr_p vs. Open 09:30 ET היום
+#  Wk%    = curr_p vs. Open 10:00 ET יום שני
+#  Status = ✅ Break אם Wk% >= 0  |  ❌ Below אם Wk% < 0
+# ═══════════════════════════════════════════════════
 
 def get_portfolio_performance(watchlist):
     if not watchlist:
@@ -152,43 +144,43 @@ def get_portfolio_performance(watchlist):
 
     for t, label in watchlist.items():
         try:
-            d5_today = get_today_rth_5m(t)
-            if d5_today is None or d5_today.empty:
+            # ── נתוני היום (5m RTH) ────────────────────────────────────
+            d5_today = get_5m_rth(t, period='1d')
+            close_s  = extract_col(d5_today, 'Close')
+            if close_s is None or close_s.empty:
                 report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️ NoData`\n"
                 continue
 
-            curr_p = get_current_price_from_today(d5_today)
-            if curr_p is None:
-                report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️ NoData`\n"
-                continue
+            curr_p = float(close_s.iloc[-1])
 
-            day_open = find_bar_value_at_or_after(d5_today, 'Open', 9, 30)
-            if day_open is None:
-                day_open = curr_p
+            # ── Day%: Open 09:30 ET היום ───────────────────────────────
+            day_open = find_open_at_or_after(d5_today, 9, 30)
+            if day_open is None: day_open = curr_p
             day_chg = ((curr_p / day_open) - 1) * 100
 
-            wk_open = get_week_anchor_open_10am(t)
-            if wk_open is None:
-                wk_open = day_open
+            # ── Wk%: Open 10:00 ET יום שני ────────────────────────────
+            wk_open = get_monday_10am_open(t)
+            if wk_open is None: wk_open = day_open
             wk_chg = ((curr_p / wk_open) - 1) * 100
 
-            high_d5 = extract_col(d5_today, 'High')
-            if high_d5 is not None and len(high_d5) >= 6:
-                open_high = float(high_d5.iloc[:6].max())
-            elif high_d5 is not None and not high_d5.empty:
-                open_high = float(high_d5.max())
-            else:
-                open_high = curr_p
-
-            status = "✅ Break" if curr_p >= open_high else "❌ Below"
+            # ── Status: פשוט סימן של Wk% ──────────────────────────────
+            status     = "✅ Break" if wk_chg >= 0 else "❌ Below"
             type_label = (label[:7] + ".") if len(label) > 8 else label[:8]
-            report += f"`{type_label:<8} | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+
+            report += (
+                f"`{type_label:<8} | {t:<5} | {curr_p:>6.2f} | "
+                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            )
+
         except Exception:
             report += f"`{'Err':<8} | {t:<5} | N/A    | N/A   | N/A   | ❌ Err`\n"
-            continue
 
     report += "`----------------------------------------------------`\n"
     return report
+
+# ═══════════════════════════════════════════════════
+#  3. ניתוח AI מוסדי
+# ═══════════════════════════════════════════════════
 
 def get_ai_report(custom_prompt=None):
     try:
@@ -196,59 +188,77 @@ def get_ai_report(custom_prompt=None):
         for t in ["^GSPC", "^VIX"]:
             for n in yf.Ticker(t).news[:2]:
                 title = n.get('title') or n.get('content', {}).get('title')
-                if title:
-                    news += f"- {title}\n"
-        p = custom_prompt if custom_prompt else f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\nמבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+                if title: news += f"- {title}\n"
+        p = custom_prompt or (
+            f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\n"
+            f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
+            f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+        )
         client = genai.Client(api_key=GEMINI_KEY)
         target = next((m.name for m in client.models.list() if 'flash' in m.name), 'gemini-1.5-flash')
         return client.models.generate_content(model=target, contents=p).text
     except:
         return "⚠️ AI Summary Unavailable"
 
+# ═══════════════════════════════════════════════════
+#  4. סריקת פריצות — Status = Break מה-watchlist
+# ═══════════════════════════════════════════════════
+
 def run_execution_scan(watchlist):
+    """
+    מדווח על מניות שה-Wk% שלהן חיובי (Status = Break).
+    משתמש באותו עוגן שבועי בדיוק כמו הטבלה.
+    """
     res = {"STOCKS": [], "ETF": []}
     for t, label in watchlist.items():
         category = "ETF" if "Top 5 E" in label or "ETF" in label.upper() else "STOCKS"
         try:
-            d5_today = get_today_rth_5m(t)
-            curr_p = get_current_price_from_today(d5_today)
-            high_s = extract_col(d5_today, 'High')
-            if curr_p is None or high_s is None or len(high_s) < 7:
-                continue
-            if curr_p > float(high_s.iloc[:6].max()):
+            d5_today = get_5m_rth(t, period='1d')
+            close_s  = extract_col(d5_today, 'Close')
+            if close_s is None or close_s.empty: continue
+            curr_p  = float(close_s.iloc[-1])
+            wk_open = get_monday_10am_open(t)
+            if wk_open is None: continue
+            if curr_p >= wk_open:
                 res[category].append(t)
         except:
             continue
 
-    vix = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
-    report  = "🎯 *Execution Scan Result:*\n"
+    vix    = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
+    report = "🎯 *Execution Scan Result:*\n"
     report += f"🥇 STOCKS: {', '.join(res['STOCKS']) or 'None'}\n"
     report += f"🏅 ETF: {', '.join(res['ETF']) or 'None'}\n\n"
     if not res["STOCKS"] and not res["ETF"]:
-        report += "💡 *סיכום טכני:* השוק בדשדוש; אין פריצות מעל גבוה הבוקר."
-        if vix > 22:
-            report += " להמתין ל-VIX."
+        report += "💡 *סיכום טכני:* אין נכסים מעל עוגן השבוע."
+        if vix > 22: report += " VIX גבוה — זהירות."
     else:
-        report += f"🚀 *סיכום טכני:* זוהו פריצות מומנטום ב-{len(res['STOCKS']) + len(res['ETF'])} נכסים."
+        total   = len(res['STOCKS']) + len(res['ETF'])
+        report += f"🚀 *סיכום טכני:* {total} נכסים מעל עוגן שבוע המסחר."
     return report
 
+# ═══════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════
+
 def main():
-    service = get_drive_service()
-    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=ISR_TZ_OFFSET)
-    hour = now.hour
+    service   = get_drive_service()
+    now       = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    hour      = now.hour
     is_manual = os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
 
+    # SPY Day% = Open 09:30 ET היום
     try:
-        spy_today = get_today_rth_5m("SPY")
-        s_p = get_current_price_from_today(spy_today)
-        spy_open = find_bar_value_at_or_after(spy_today, 'Open', 9, 30)
-        s_c = ((s_p / spy_open) - 1) * 100 if s_p is not None and spy_open is not None else 0.0
+        spy_d5  = get_5m_rth("SPY", period='1d')
+        spy_cls = extract_col(spy_d5, 'Close')
+        s_p     = float(spy_cls.iloc[-1])
+        spy_opn = find_open_at_or_after(spy_d5, 9, 30)
+        s_c     = ((s_p / spy_opn) - 1) * 100 if spy_opn else 0.0
     except:
         s_p, s_c = 0.0, 0.0
 
-    vix_val = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
+    vix_val      = float(yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1])
     status_label = 'BEARISH' if vix_val > 25 else 'CAUTION' if vix_val > 18 else 'BULLISH'
 
     header = (
