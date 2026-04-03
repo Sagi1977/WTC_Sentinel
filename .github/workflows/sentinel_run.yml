@@ -1,11 +1,12 @@
 name: WTC Sentinel Execution
+
 on:
   schedule:
-    # מריץ בכל 5 דקות בין 13:00 ל-13:30 UTC (שזה 16:00-16:30 בישראל)
+    # 16:00-16:55 ישראל (13:00-13:55 UTC) — AI Report
     - cron: '*/5 13 * * 1-5'
-    # מריץ בכל 5 דקות בין 14:00 ל-14:20 UTC (שזה 17:00-17:20 בישראל)
-    - cron: '*/5 14 * * 1-5'
-    # מריץ ב-20:00 UTC (שזה 23:00 בישראל)
+    # 17:00-20:55 ישראל (14:00-17:55 UTC) — Portfolio + Scan
+    - cron: '0 14-17 * * 1-5'
+    # 23:00 ישראל (20:00 UTC) — Closing Summary
     - cron: '0 20 * * 1-5'
   workflow_dispatch:
 
@@ -33,11 +34,11 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai
+          pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai pytz
 
       - name: Run Sentinel Script
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python main.py
+        run: python main2.py
