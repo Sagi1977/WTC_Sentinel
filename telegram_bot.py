@@ -17,10 +17,9 @@ def send_msg(text):
             }, timeout=10)
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 def get_updates(offset=None):
-    """Long polling — ממתין עד 20 שניות לעדכון חדש"""
     params = {"timeout": 20, "allowed_updates": ["message"]}
     if offset:
         params["offset"] = offset
@@ -31,7 +30,6 @@ def get_updates(offset=None):
         return []
 
 def clear_pending():
-    """מנקה את כל ההודעות שנשלחו כשהבוט היה כבוי"""
     try:
         r = requests.get(f"{BASE}/getUpdates", params={"timeout": 0, "offset": -1}, timeout=10)
         results = r.json().get("result", [])
@@ -49,9 +47,7 @@ def run_report():
     try:
         result = subprocess.run(
             ["python", "main.py"],
-            capture_output=True,
-            text=True,
-            timeout=300,
+            capture_output=True, text=True, timeout=300,
             env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch"}
         )
         if result.returncode != 0:
@@ -68,7 +64,6 @@ def main():
     print(f"Bot starting — CHAT_ID={CHAT_ID}")
     offset = clear_pending()
     print(f"Starting offset={offset}")
-
     deadline = time.time() + 45
 
     while time.time() < deadline:
@@ -82,17 +77,11 @@ def main():
             chat_id = str(msg.get("chat", {}).get("id", ""))
             print(f"chat_id={chat_id} text={text!r}")
             if chat_id != CHAT_ID:
-                print(f"Ignored chat_id={chat_id}")
                 continue
             if text in ("/start", "/report", "/דוח", "start", "report"):
                 run_report()
             elif text in ("/help", "help"):
-                send_msg(
-                    "📋 *פקודות:*\n"
-                    "/start — דוח מלא\n"
-                    "/report — דוח מלא\n"
-                    "/help — עזרה"
-                )
+                send_msg("📋 *פקודות:*\n/start — דוח מלא\n/help — עזרה")
             else:
                 send_msg(f"❓ לא מכיר: `{text}`\nשלח /help לרשימת הפקודות.")
 
