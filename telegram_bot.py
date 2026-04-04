@@ -19,15 +19,30 @@ def send_msg(text):
             pass
         time.sleep(0.3)
 
-def get_updates(offset=None):
-    params = {"timeout": 20, "allowed_updates": ["message"]}
-    if offset:
+def get_updates(offset=None, timeout=20):
+    params = {"timeout": timeout, "allowed_updates": ["message"]}
+    if offset is not None:
         params["offset"] = offset
     try:
-        r = requests.get(f"{BASE}/getUpdates", params=params, timeout=25)
+        r = requests.get(f"{BASE}/getUpdates", params=params, timeout=timeout + 5)
         return r.json().get("result", [])
     except Exception:
         return []
+
+def get_latest_offset():
+    """מחזיר את ה-update_id של ההודעה האחרונה — בלי למחוק כלום"""
+    try:
+        r = requests.get(f"{BASE}/getUpdates", params={"timeout": 0}, timeout=10)
+        results = r.json().get("result", [])
+        if results:
+            return results[-1]["update_id"]
+        return None
+    except Exception:
+        return None
+
+def ack(offset):
+    """מסמן הודעה כנקראה — מונע עיבוד כפול בריצה הבאה"""
+    get_updates(offset=offset, timeout=0)
 
 def run_report():
     send_msg("⏳ *מריץ דוח מלא... 30-60 שניות...*")
@@ -50,15 +65,28 @@ def run_report():
 def main():
     print(f"Bot starting — CHAT_ID={CHAT_ID}")
 
-    # offset=None — קורא את כל ההודעות הממתינות ומעבד אותן
-    offset = None
+    # ── שלב 1: בדוק מה קיים בתור ──────────────────────────────────
+    latest = get_latest_offset()
+
+    if latest is None:
+        # תור ריק — האזן להודעות חדשות בלבד
+        offset = None
+        print("Queue empty — listening for new messages")
+    else:
+        # יש הודעות — התחל מהאחרונה (כולל אותה)
+        offset = latest
+        print(f"Queue has messages, starting from offset={offset}")
+
+    # ── שלב 2: polling 45 שניות ────────────────────────────────────
     deadline = time.time() + 45
 
     while time.time() < deadline:
-        if deadline - time.time() < 5:
+        remaining = int(deadline - time.time())
+        if remaining < 5:
             break
 
-        updates = get_updates(offset)
+        poll_timeout = min(20, remaining - 3)
+        updates = get_updates(offset=offset, timeout=poll_timeout)
 
         for upd in updates:
             offset = upd["update_id"] + 1
@@ -69,15 +97,19 @@ def main():
             print(f"Received: chat_id={chat_id} text={text!r}")
 
             if chat_id != CHAT_ID:
-                print(f"Ignored unknown chat_id={chat_id}")
+                print(f"Ignored: {chat_id}")
+                ack(offset)
                 continue
 
             if text in ("/start", "/report", "/דוח", "start", "report"):
+                ack(offset)       # ← סמן כנקרא לפני הריצה הארוכה
                 run_report()
             elif text in ("/help", "help"):
                 send_msg("📋 *פקודות:*\n/start — דוח מלא\n/help — עזרה")
+                ack(offset)
             else:
                 send_msg(f"❓ לא מכיר: `{text}`\nשלח /help לרשימת הפקודות.")
+                ack(offset)
 
     print(f"Bot finished, final offset={offset}")
 
