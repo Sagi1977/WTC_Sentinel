@@ -45,6 +45,13 @@ def get_pending_commands():
             chat_id = str(msg.get("chat", {}).get("id", ""))
             if chat_id == CHAT_ID and text in ("/start", "/report", "/דוח", "start", "report"):
                 commands.append(text)
+                # אישור מיידי למשתמש
+                try:
+                    requests.post(f"{BASE}/sendMessage",
+                        json={"chat_id": CHAT_ID, "text": "✅ קיבלתי! מכין דוח מלא..."},
+                        timeout=10)
+                except Exception:
+                    pass
         # ACK — ניקוי התור
         if last_id is not None:
             requests.get(f"{BASE}/getUpdates",
@@ -307,13 +314,13 @@ def main():
     db = get_market_dashboard()
     db += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
 
-    if hour == 16 and minute <= 5:
+    if hour == 16 and minute <= 35:
         send_msg(f"{db}\n{get_ai_report()}")
-    elif 17 <= hour <= 20 and minute <= 5:
+    elif 17 <= hour <= 20 and minute <= 35:
         portfolio = get_portfolio_performance(watchlist)
         send_msg(f"{db}\n{portfolio}")
         send_msg(run_execution_scan(service))
-    elif hour == 23 and minute <= 5:
+    elif hour == 23 and minute <= 35:
         closing = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי."
         send_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing)}")
     else:
