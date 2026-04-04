@@ -2,8 +2,7 @@ name: WTC Telegram Bot (On-Demand)
 
 on:
   schedule:
-    # כל 5 דקות, כל יום, 09:00-01:00 לילה ישראל (06:00-22:00 UTC)
-    - cron: '*/5 6-22 * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -30,8 +29,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas yfinance requests google-api-python-client \
-                      google-auth-httplib2 google-auth-oauthlib google-genai pytz
+          pip install pandas yfinance requests google-api-python-client                       google-auth-httplib2 google-auth-oauthlib google-genai pytz
 
       - name: Run Telegram Bot
         env:
