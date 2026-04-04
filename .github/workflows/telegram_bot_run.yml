@@ -2,8 +2,8 @@ name: WTC Telegram Bot (On-Demand)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '* * * * *'
+    workflow_dispatch:
 
 jobs:
   telegram-bot:
