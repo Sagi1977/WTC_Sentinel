@@ -267,7 +267,7 @@ def main():
     now       = datetime.datetime.now(datetime.timezone.utc).astimezone(isr_tz)
     hour      = now.hour
     minute    = now.minute
-    is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    is_manual = True
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
     db        = get_market_dashboard()
