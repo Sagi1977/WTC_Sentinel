@@ -52,15 +52,14 @@ def run_report():
             capture_output=True, text=True, timeout=300,
             env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch"}
         )
+        # הצג stdout וגם stderr
+        if result.stdout:
+            print(f"STDOUT: {result.stdout[:500]}")
         if result.returncode != 0:
             err = (result.stderr or "")[-800:]
             send_msg(f"❌ *שגיאה:*\n`{err}`")
         else:
-            print("main.py finished OK")
-    except subprocess.TimeoutExpired:
-        send_msg("⚠️ *Timeout — הדוח לקח יותר מ-5 דקות*")
-    except Exception as e:
-        send_msg(f"❌ *Exception:* `{str(e)[:300]}`")
+            send_msg("✅ *main.py רץ — בדוק אם קיבלת הודעות*")
 
 def main():
     print(f"Bot starting — CHAT_ID={CHAT_ID}")
