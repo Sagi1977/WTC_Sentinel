@@ -30,7 +30,6 @@ def get_updates(offset=None, timeout=20):
         return []
 
 def get_latest_offset():
-    """מחזיר את ה-update_id של ההודעה האחרונה — בלי למחוק כלום"""
     try:
         r = requests.get(f"{BASE}/getUpdates", params={"timeout": 0}, timeout=10)
         results = r.json().get("result", [])
@@ -41,7 +40,6 @@ def get_latest_offset():
         return None
 
 def ack(offset):
-    """מסמן הודעה כנקראה — מונע עיבוד כפול בריצה הבאה"""
     get_updates(offset=offset, timeout=0)
 
 def run_report():
@@ -52,31 +50,31 @@ def run_report():
             capture_output=True, text=True, timeout=300,
             env={**os.environ, "GITHUB_EVENT_NAME": "workflow_dispatch"}
         )
-        # הצג stdout וגם stderr
         if result.stdout:
             print(f"STDOUT: {result.stdout[:500]}")
         if result.returncode != 0:
             err = (result.stderr or "")[-800:]
             send_msg(f"❌ *שגיאה:*\n`{err}`")
         else:
-            send_msg("✅ *main.py רץ — בדוק אם קיבלת הודעות*")
+            send_msg("✅ *main.py רץ בהצלחה*")
+            print("main.py finished OK")
+    except subprocess.TimeoutExpired:
+        send_msg("⚠️ *Timeout — הדוח לקח יותר מ-5 דקות*")
+    except Exception as e:
+        send_msg(f"❌ *Exception:* `{str(e)[:300]}`")
 
 def main():
     print(f"Bot starting — CHAT_ID={CHAT_ID}")
 
-    # ── שלב 1: בדוק מה קיים בתור ──────────────────────────────────
     latest = get_latest_offset()
 
     if latest is None:
-        # תור ריק — האזן להודעות חדשות בלבד
         offset = None
         print("Queue empty — listening for new messages")
     else:
-        # יש הודעות — התחל מהאחרונה (כולל אותה)
         offset = latest
         print(f"Queue has messages, starting from offset={offset}")
 
-    # ── שלב 2: polling 45 שניות ────────────────────────────────────
     deadline = time.time() + 45
 
     while time.time() < deadline:
@@ -101,7 +99,7 @@ def main():
                 continue
 
             if text in ("/start", "/report", "/דוח", "start", "report"):
-                ack(offset)       # ← סמן כנקרא לפני הריצה הארוכה
+                ack(offset)
                 run_report()
             elif text in ("/help", "help"):
                 send_msg("📋 *פקודות:*\n/start — דוח מלא\n/help — עזרה")
