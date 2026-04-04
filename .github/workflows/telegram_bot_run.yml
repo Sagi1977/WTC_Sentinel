@@ -31,10 +31,10 @@ jobs:
         run: |
           pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai pytz
 
-      - name: Run Telegram Bot
+      - name: Run Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          timeout 55 python telegram_bot.py || true
+          python main.py
