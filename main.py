@@ -12,63 +12,27 @@ from google import genai
 import google.auth
 import io
 
-TOKEN     = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID   = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-BASE      = f"https://api.telegram.org/bot{TOKEN}"
+TOKEN    = os.environ.get('TELEGRAM_TOKEN')
+CHAT_ID  = os.environ.get('TELEGRAM_CHAT_ID')
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY')
 
-# ─── Telegram helpers ────────────────────────────────────────────
-def send_msg(text):
+def send_telegram_msg(text):
     if not text: return
-    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-        try:
-            requests.post(f"{BASE}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "Markdown"},
-                timeout=10)
-        except Exception:
-            pass
-        time.sleep(0.5)
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text[:4000], "parse_mode": "Markdown"}
+    res = requests.post(url, json=payload)
+    if res.status_code != 200:
+        requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]})
+    time.sleep(1.2)
 
-def get_pending_commands():
-    """מחזיר רשימת פקודות שממתינות, ומנקה את התור"""
-    commands = []
-    try:
-        r = requests.get(f"{BASE}/getUpdates", params={"timeout": 0}, timeout=10)
-        updates = r.json().get("result", [])
-        if not updates:
-            return commands
-        last_id = None
-        for upd in updates:
-            last_id = upd["update_id"]
-            msg = upd.get("message", {})
-            text = msg.get("text", "").strip().lower()
-            chat_id = str(msg.get("chat", {}).get("id", ""))
-            if chat_id == CHAT_ID and text in ("/start", "/report", "/דוח", "start", "report"):
-                commands.append(text)
-                # אישור מיידי למשתמש
-                try:
-                    requests.post(f"{BASE}/sendMessage",
-                        json={"chat_id": CHAT_ID, "text": "✅ קיבלתי! מכין דוח מלא..."},
-                        timeout=10)
-                except Exception:
-                    pass
-        # ACK — ניקוי התור
-        if last_id is not None:
-            requests.get(f"{BASE}/getUpdates",
-                params={"offset": last_id + 1, "timeout": 0}, timeout=10)
-    except Exception:
-        pass
-    return commands
-
-# ─── Google Drive ─────────────────────────────────────────────────
 def get_drive_service():
     creds, _ = google.auth.default()
     return build("drive", "v3", credentials=creds)
 
 def download_latest_file(service, prefix):
     try:
-        res = service.files().list(
-            q=f"name contains '{prefix}'", orderBy="createdTime desc").execute()
+        query = f"name contains '{prefix}'"
+        res = service.files().list(q=query, orderBy="createdTime desc").execute()
         files = res.get("files", [])
         if not files: return None, "❓ Missing"
         fh = io.BytesIO()
@@ -78,7 +42,7 @@ def download_latest_file(service, prefix):
     except Exception as e:
         return None, f"Err: {str(e)[:30]}"
 
-# ─── Data helpers ─────────────────────────────────────────────────
+# ─── extract_col: תמיד Series (squeeze מונע DataFrame) ───────────
 def extract_col(df, col_name):
     if df is None or df.empty: return None
     try:
@@ -126,7 +90,7 @@ def get_monday_10am_open(ticker):
         return find_open_at_or_after(monday_df, 10, 0)
     except: return None
 
-# ─── 1. Watchlist ─────────────────────────────────────────────────
+# ─── 1. Watchlist דינמי ───────────────────────────────────────────
 def build_dynamic_watchlist(service):
     watchlist, logs = {}, []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
@@ -147,14 +111,15 @@ def build_dynamic_watchlist(service):
             logs.append(f"❌ {prefix}: {status}")
     return watchlist, "\n".join(logs)
 
-# ─── 2. Dashboard ─────────────────────────────────────────────────
+# ─── 2. Dashboard — SPY Day% = Close אתמול vs Close היום ─────────
+# בדיוק כמו כל אתר פיננסי (Yahoo, Bloomberg וכו')
 def get_market_dashboard():
     try:
         spy_2d  = yf.download("SPY", period="2d", interval="1d", progress=False)
         spy_cls = extract_col(spy_2d, "Close")
         s_p     = float(spy_cls.iloc[-1])
         prev_c  = float(spy_cls.iloc[-2])
-        s_c     = ((s_p / prev_c) - 1) * 100
+        s_c     = ((s_p / prev_c) - 1) * 100      # ✅ Close אתמול → Close היום
         v_p     = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
         status  = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji   = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
@@ -167,37 +132,41 @@ def get_market_dashboard():
         )
     except: return "⚠️ Dashboard Offline\n\n"
 
-# ─── 3. Portfolio ─────────────────────────────────────────────────
+# ─── 3. Portfolio — Day% = Close אתמול | Wk% = Open שני 10:00 ───
 def get_portfolio_performance(watchlist):
     if not watchlist: return "⚠️ Watchlist empty\n"
     report  = "📈 *My Portfolio Watch (Dynamic)*\n"
-    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
+    report += "`Type       | Ticker | Price  | Day%  | Wk%   | Status`\n"
     report += "`--------------------------------------------------`\n"
     for t, label in watchlist.items():
         try:
-            d2     = yf.download(t, period="2d", interval="1d", progress=False)
-            cls_d2 = extract_col(d2, "Close")
+            # Close היום
+            d2       = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2   = extract_col(d2, "Close")
             if cls_d2 is None or len(cls_d2) < 2:
-                report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
+                report += f"`{'N/D':<8} | {t:<5} | N/A    | N/A   | N/A   | ⚠️`\n"
                 continue
-            curr_p  = float(cls_d2.iloc[-1])
-            prev_p  = float(cls_d2.iloc[-2])
-            day_chg = ((curr_p / prev_p) - 1) * 100
-            wk_open = get_monday_10am_open(t)
+            curr_p   = float(cls_d2.iloc[-1])
+            prev_p   = float(cls_d2.iloc[-2])
+            day_chg  = ((curr_p / prev_p) - 1) * 100    # ✅ Close אתמול → Close היום
+
+            # Wk% = Open 10:00 ET יום שני → Close היום
+            wk_open  = get_monday_10am_open(t)
             if wk_open is None: wk_open = prev_p
-            wk_chg  = ((curr_p / wk_open) - 1) * 100
-            status  = "✅ Break" if wk_chg >= 0 else "❌ Below"
-            lbl     = (label[:7] + ".") if len(label) > 8 else label[:8]
-            report += (
+            wk_chg   = ((curr_p / wk_open) - 1) * 100
+
+            status   = "✅ Break" if wk_chg >= 0 else "❌ Below"
+            lbl      = (label[:7] + ".") if len(label) > 8 else label[:8]
+            report  += (
                 f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
                 f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
             )
         except:
-            report += f"`{'Err':<8} | {t:<5} | N/A | N/A | N/A | ❌`\n"
+            report += f"`{'Err':<8} | {t:<5} | N/A    | N/A   | N/A   | ❌`\n"
     report += "`--------------------------------------------------`\n"
     return report + "\n"
 
-# ─── 4. AI Report ────────────────────────────────────────────────
+# ─── 4. AI Report ─────────────────────────────────────────────────
 def get_ai_report(custom_prompt=None):
     news = ""
     for t in ["^GSPC", "^VIX"]:
@@ -217,32 +186,33 @@ def get_ai_report(custom_prompt=None):
         return client.models.generate_content(model=target, contents=prompt).text
     except: return "⚠️ AI Summary Unavailable"
 
-# ─── 5. UnderDogs ────────────────────────────────────────────────
+# ─── 5. UnderDogs רשימה ───────────────────────────────────────────
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
         df, _ = download_latest_file(service, prefix)
         if df is None: continue
         clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
-        df    = df.rename(columns=clean)
-        sel   = next((c for c in df.columns if "final" in c or "selection" in c), None)
-        tcol  = next((c for c in df.columns if "ticker" in c), "ticker")
-        scol  = next((c for c in df.columns if "score" in c), None)
+        df = df.rename(columns=clean)
+        sel  = next((c for c in df.columns if "final" in c or "selection" in c), None)
+        tcol = next((c for c in df.columns if "ticker" in c), "ticker")
+        scol = next((c for c in df.columns if "score" in c), None)
         if not sel or tcol not in df.columns: continue
-        mask  = ~df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
+        mask = ~df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
         for _, row in df[mask].iterrows():
             t     = str(row[tcol]).strip().upper()
             score = row.get(scol, "N/A") if scol else "N/A"
             if t: underdogs.append((t, bucket, score))
     return underdogs
 
-# ─── 6. Execution Scan ───────────────────────────────────────────
+# ─── 6. Execution Scan — UnderRadar ──────────────────────────────
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
     res = {"STOCKS": [], "ETF": []}
+
     for t, bucket, score in underdogs:
         try:
-            d2     = yf.download(t, period="2d", interval="1d", progress=False)
+            d2    = yf.download(t, period="2d", interval="1d", progress=False)
             cls_d2 = extract_col(d2, "Close")
             if cls_d2 is None or len(cls_d2) < 2: continue
             curr_p  = float(cls_d2.iloc[-1])
@@ -254,28 +224,34 @@ def run_execution_scan(service):
             if wk_chg > 5:
                 res[bucket].append((t, curr_p, day_chg, wk_chg, score))
         except: continue
+
     res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
     res["ETF"].sort(key=lambda x: x[3], reverse=True)
+
     total = len(res["STOCKS"]) + len(res["ETF"])
     v_p   = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+
     report  = "🎯 *Execution Scan — UnderRadar*\n"
     report += "`-----------------------------`\n\n"
+
     report += "🥇 *STOCKS:*\n"
     if res["STOCKS"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
         report += "`-----------------------------------`\n"
         for t, p, d, w, sc in res["STOCKS"]:
             report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
         report += "_None_\n"
+
     report += "\n🏅 *ETF:*\n"
     if res["ETF"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
         report += "`-----------------------------------`\n"
         for t, p, d, w, sc in res["ETF"]:
             report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
         report += "_None_\n"
+
     report += "\n"
     if total == 0:
         report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
@@ -284,47 +260,35 @@ def run_execution_scan(service):
         report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
     return report
 
-# ─── שליחת דוח מלא ───────────────────────────────────────────────
-def send_full_report(service, watchlist, drive_logs):
-    db = get_market_dashboard()
-    db += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
-    portfolio = get_portfolio_performance(watchlist)
-    send_msg(f"{db}\n{portfolio}")
-    send_msg(get_ai_report())
-    send_msg(run_execution_scan(service))
-
-# ─── MAIN ─────────────────────────────────────────────────────────
+# ─── MAIN ──────────────────────────────────────────────────────────
 def main():
-    service = get_drive_service()
-    isr_tz  = pytz.timezone("Asia/Jerusalem")
-    now     = datetime.datetime.now(datetime.timezone.utc).astimezone(isr_tz)
-    hour    = now.hour
-    minute  = now.minute
+    service   = get_drive_service()
+    isr_tz    = pytz.timezone("Asia/Jerusalem")
+    now       = datetime.datetime.now(datetime.timezone.utc).astimezone(isr_tz)
+    hour      = now.hour
+    minute    = now.minute
+    is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
+    db        = get_market_dashboard()
+    portfolio = get_portfolio_performance(watchlist)
+    db       += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
 
-    # ── בדיקה: יש /start מהמשתמש? ──
-    commands = get_pending_commands()
-    if commands:
-        print(f"Found command: {commands[0]} — sending full report")
-        send_full_report(service, watchlist, drive_logs)
+    if is_manual:
+        send_telegram_msg(f"{db}\n{portfolio}")
+        send_telegram_msg(get_ai_report())
+        send_telegram_msg(run_execution_scan(service))
         return
 
-    # ── דוחות אוטומטיים לפי שעה ──
-    db = get_market_dashboard()
-    db += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
-
-    if hour == 16 and minute <= 35:
-        send_msg(f"{db}\n{get_ai_report()}")
-    elif 17 <= hour <= 20 and minute <= 35:
-        portfolio = get_portfolio_performance(watchlist)
-        send_msg(f"{db}\n{portfolio}")
-        send_msg(run_execution_scan(service))
-    elif hour == 23 and minute <= 35:
+    if hour == 16:
+        send_telegram_msg(f"{db}\n{get_ai_report()}")
+    elif 17 <= hour <= 20:
+        if minute <= 10:
+            send_telegram_msg(f"{db}\n{portfolio}")
+            send_telegram_msg(run_execution_scan(service))
+    elif hour == 23:
         closing = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי."
-        send_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing)}")
-    else:
-        print(f"No command, no scheduled slot. Hour={hour}:{minute:02d} IST — done.")
+        send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing)}")
 
 if __name__ == "__main__":
     main()
