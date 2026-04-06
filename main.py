@@ -106,25 +106,19 @@ def find_open_at_or_after(df, target_hour, target_minute):
 
 def get_monday_10am_open(ticker):
     try:
-        # מושכים מספיק נתונים כדי לכסות את תחילת השבוע
+        # מושכים 7 ימים כדי להבטיח כיסוי של תחילת השבוע
         df = get_5m_rth(ticker, period="7d") 
-        if df is None or df.empty:
-            return None
+        if df is None or df.empty: return None
         
-        et_idx = df.index.tz_convert("America/New_York") if (hasattr(df.index, "tz") and df.index.tz) else df.index
+        et_idx = df.index.tz_convert("America/New_York")
+        # מוצאים את כל ימי השני בנתונים ולוקחים את האחרון (הכי קרוב)
+        mondays = sorted(list(set([ts.date() for ts in et_idx if ts.weekday() == 0])), reverse=True)
+        if not mondays: return None
         
-        # מוצאים את התאריך של יום שני האחרון (הכי קרוב להיום)
-        all_mondays = [ts.date() for ts in et_idx if ts.weekday() == 0]
-        if not all_mondays:
-            return None
-        
-        last_monday_date = max(all_mondays) # לוקח את יום שני הכי קרוב
-        
-        # מסננים רק את הנתונים של יום שני האחרון
-        monday_df = df[et_idx.date == last_monday_date]
-        
+        target_date = mondays[0]
+        monday_df = df[et_idx.date == target_date]
         return find_open_at_or_after(monday_df, 10, 0)
-    except Exception:
+    except:
         return None
 
 
