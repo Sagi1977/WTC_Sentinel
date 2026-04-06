@@ -212,8 +212,18 @@ def get_ai_report(custom_prompt=None):
 
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
-    res       = {"STOCKS": [], "ETF": []}
+    report    = "🎯 *Execution Scan*\n"
+
+    # Golden Plan status
+    for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
+        df, status = download_latest_file(service, prefix)
+        report += f"**{prefix}:** {status}\n"
+
+    report += "\n🥇 *STOCKS:* "
+    stocks = []
     for t, bucket, score in underdogs:
+        if bucket != "STOCKS":
+            continue
         try:
             d2     = yf.download(t, period="2d", interval="1d", progress=False)
             cls_d2 = extract_col(d2, "Close")
@@ -226,49 +236,46 @@ def run_execution_scan(service):
             if wk_open is None:
                 continue
             wk_chg  = (curr_p / wk_open - 1) * 100
-            if wk_chg >= 5:
-                res[bucket].append((t, curr_p, day_chg, wk_chg, score))
+            stocks.append((t, score, curr_p, day_chg, wk_chg))
         except:
             continue
 
-    res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
-    res["ETF"].sort(key=lambda x: x[3], reverse=True)
-    total = len(res["STOCKS"]) + len(res["ETF"])
-
-    try:
-        vp = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-    except:
-        vp = 0
-
-    report  = "🎯 *Execution Scan — UnderRadar*\n"
-    report += "`------------------------------`\n"
-
-    report += "\n🥇 *STOCKS:*\n"
-    if res["STOCKS"]:
-        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
-        report += "`-------------------------------------`\n"
-        for t, p, d, w, sc in res["STOCKS"]:
-            report += f"`{t:<5}  | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
+    if stocks:
+        stocks.sort(key=lambda x: x[4], reverse=True)
+        for t, score, p, d, w in stocks:
+            report += f"`{t}({score})` "
     else:
-        report += "`None`\n"
+        report += "`None`"
 
-    report += "\n🥈 *ETF:*\n"
-    if res["ETF"]:
-        report += "`Ticker | Price  | Day%  | Wk%   | Score`\n"
-        report += "`-------------------------------------`\n"
-        for t, p, d, w, sc in res["ETF"]:
-            report += f"`{t:<5}  | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
+    report += "\n\n🏅 *ETF:* "
+    etfs = []
+    for t, bucket, score in underdogs:
+        if bucket != "ETF":
+            continue
+        try:
+            d2     = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2 = extract_col(d2, "Close")
+            if cls_d2 is None or len(cls_d2) < 2:
+                continue
+            curr_p  = float(cls_d2.iloc[-1])
+            prev_p  = float(cls_d2.iloc[-2])
+            day_chg = (curr_p / prev_p - 1) * 100
+            wk_open = get_monday_10am_open(t)
+            if wk_open is None:
+                continue
+            wk_chg  = (curr_p / wk_open - 1) * 100
+            etfs.append((t, score, curr_p, day_chg, wk_chg))
+        except:
+            continue
+
+    if etfs:
+        etfs.sort(key=lambda x: x[4], reverse=True)
+        for t, score, p, d, w in etfs:
+            report += f"`{t}({score})` "
     else:
-        report += "`None`\n"
+        report += "`None`"
 
-    if total == 0:
-        report += "\n💡 אין הזדמנויות Wk% > +5% כרגע."
-        if vp > 22:
-            report += " VIX גבוה — זהירות."
-    else:
-        report += f"\n🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
-
-    return report
+    return report + "\n"
 
 def send_full_report(service, watchlist, drive_logs):
     db        = get_market_dashboard()
