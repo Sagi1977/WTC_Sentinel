@@ -81,7 +81,19 @@ def process_sentinel():
         return
 
     # ניקוי רשימת הטיקרים
-    tickers = df_p['symbol'].dropna().unique().tolist()
+    # ניקוי שמות העמודות (הסרת רווחים והפיכה לאותיות קטנות)
+    df_p.columns = df_p.columns.str.strip().str.lower()
+    
+    # חיפוש עמודת הטיקר (בדיקה של כמה שמות נפוצים)
+    possible_cols = ['symbol', 'ticker', 'tkr', 's']
+    symbol_col = next((c for c in possible_cols if c in df_p.columns), None)
+    
+    if not symbol_col:
+        print(f"❌ שגיאה: לא נמצאה עמודת מניות בקובץ. עמודות קיימות: {list(df_p.columns)}")
+        send_msg(f"❌ שגיאה טכנית: קובץ ה-Priority הגיע ללא עמודת symbol. עמודות שנמצאו: {list(df_p.columns)}")
+        return
+
+    tickers = df_p[symbol_col].dropna().unique().tolist()
     
     print(f"🚀 מוריד נתונים עבור {len(tickers)} מניות...")
     # הורדה קבוצתית לביצועים מהירים
