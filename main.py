@@ -242,4 +242,8 @@ def main():
             send_telegram_msg(f"{db}\n{portfolio}")
             send_telegram_msg(run_execution_scan(service))
     elif hour == 23:
-        closing = "סכם בעברית את יום המסחר ב
+        closing = "סכם בעברית את יום המסחר בוול סטריט עבור סוחר מקצועי."
+        send_telegram_msg(f"{db}🌙 *Closing Summary*\n\n{get_ai_report(closing)}")
+
+if __name__ == "__main__":
+    main()
