@@ -16,6 +16,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 BASE = f"https://api.telegram.org/bot{TOKEN}"
+NY_TZ = pytz.timezone("America/New_York")
 
 
 def send_msg(text):
@@ -82,9 +83,12 @@ def filter_rth(df):
         return df
 
 
-def get_5m_rth(ticker, period="1d"):
+def get_5m_rth(ticker, period="1d", start=None, end=None):
     try:
-        raw = yf.download(ticker, period=period, interval="5m", progress=False)
+        if start is not None or end is not None:
+            raw = yf.download(ticker, start=start, end=end, interval="5m", progress=False)
+        else:
+            raw = yf.download(ticker, period=period, interval="5m", progress=False)
         return filter_rth(raw)
     except Exception:
         return None
@@ -104,14 +108,27 @@ def find_open_at_or_after(df, target_hour, target_minute):
     return None
 
 
-def get_monday_10am_open(ticker):
+def get_current_week_monday_open(ticker, target_hour=10, target_minute=0):
     try:
-        df = get_5m_rth(ticker, period="5d")
+        now_ny = datetime.datetime.now(datetime.timezone.utc).astimezone(NY_TZ)
+        monday_date = (now_ny - datetime.timedelta(days=now_ny.weekday())).date()
+        next_day = monday_date + datetime.timedelta(days=1)
+
+        start_dt = NY_TZ.localize(datetime.datetime.combine(monday_date, datetime.time(0, 0)))
+        end_dt = NY_TZ.localize(datetime.datetime.combine(next_day, datetime.time(0, 0)))
+
+        df = get_5m_rth(
+            ticker,
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+        )
         if df is None or df.empty:
             return None
-        et_idx = df.index.tz_convert("America/New_York") if (hasattr(df.index, "tz") and df.index.tz) else df.index
-        monday_df = df[[ts.weekday() == 0 for ts in et_idx]]
-        return find_open_at_or_after(monday_df, 10, 0)
+
+        idx = df.index
+        et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
+        monday_df = df[[ts.date() == monday_date for ts in et_idx]]
+        return find_open_at_or_after(monday_df, target_hour, target_minute)
     except Exception:
         return None
 
@@ -174,7 +191,7 @@ def get_portfolio_performance(watchlist):
             curr_p = float(cls_d2.iloc[-1])
             prev_p = float(cls_d2.iloc[-2])
             day_chg = ((curr_p / prev_p) - 1) * 100
-            wk_open = get_monday_10am_open(t)
+            wk_open = get_current_week_monday_open(t)
             if wk_open is None:
                 wk_open = prev_p
             wk_chg = ((curr_p / wk_open) - 1) * 100
@@ -247,7 +264,7 @@ def run_execution_scan(service):
             curr_p = float(cls_d2.iloc[-1])
             prev_p = float(cls_d2.iloc[-2])
             day_chg = ((curr_p / prev_p) - 1) * 100
-            wk_open = get_monday_10am_open(t)
+            wk_open = get_current_week_monday_open(t)
             if wk_open is None:
                 continue
             wk_chg = ((curr_p / wk_open) - 1) * 100
