@@ -1,160 +1,305 @@
 import os
 import time
 import io
+import re
+import requests
 import pandas as pd
 import yfinance as yf
-import requests
+import pytz
 import datetime
 import google.auth
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from google import genai
 
-# הגדרות טלגרם
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 BASE = f"https://api.telegram.org/bot{TOKEN}"
 
+
 def send_msg(text):
-    if not text: return
+    if not text:
+        return
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         try:
-            requests.post(f"{BASE}/sendMessage", 
-                         json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "Markdown"}, 
-                         timeout=10)
-        except: pass
+            requests.post(
+                f"{BASE}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+        except Exception:
+            pass
         time.sleep(0.5)
+
 
 def get_drive_service():
     creds, _ = google.auth.default()
     return build("drive", "v3", credentials=creds)
 
+
 def download_latest_file(service, prefix):
     try:
-        # חיפוש חכם: מתעלם מסל המחזור ומחפש קבצי CSV בלבד
-        query = f"name contains '{prefix}' and trashed = false and mimeType = 'text/csv'"
-        res = service.files().list(q=query, orderBy="createdTime desc").execute()
+        res = service.files().list(
+            q=f"name contains '{prefix}'", orderBy="createdTime desc"
+        ).execute()
         files = res.get("files", [])
-        
         if not files:
-            print(f"⚠️ לא נמצא קובץ עם הביטוי '{prefix}'")
-            return None
-            
-        file_id = files[0]['id']
-        print(f"✅ נמצא קובץ: {files[0]['name']}")
-        
-        request = service.files().get_media(fileId=file_id)
+            return None, "❓ Missing"
         fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+        MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]["id"])).next_chunk()
         fh.seek(0)
-        return pd.read_csv(fh)
+        return pd.read_csv(fh, encoding="utf-8-sig", engine="python"), "Loaded"
     except Exception as e:
-        print(f"❌ שגיאה בהורדה: {str(e)}")
+        return None, f"Err: {str(e)[:30]}"
+
+
+def extract_col(df, col_name):
+    if df is None or df.empty:
+        return None
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            lvl = df.columns.get_level_values(0)
+            if col_name not in lvl:
+                return None
+            result = df[col_name]
+            return result.squeeze() if isinstance(result, pd.DataFrame) else result
+        return df[col_name] if col_name in df.columns else None
+    except Exception:
         return None
 
-def get_latest_monday_open(ticker_data):
-    """תיקון באג יום שני: מוצא את יום שני האחרון בנתונים"""
+
+def filter_rth(df):
+    if df is None or df.empty:
+        return df
     try:
-        if ticker_data.empty: return None
-        et_idx = ticker_data.index.tz_convert("America/New_York")
-        mondays = sorted(list(set([ts.date() for ts in et_idx if ts.weekday() == 0])), reverse=True)
-        if not mondays: return None
-        
-        target_date = mondays[0] # יום שני הכי קרוב להיום
-        monday_df = ticker_data[et_idx.date == target_date]
-        
-        for hour in [10, 11, 12]:
-            target = monday_df.between_time(f"{hour}:00", f"{hour}:15")
-            if not target.empty: return target.iloc[0]['Open']
-        return monday_df.iloc[0]['Open']
-    except: return None
+        idx = df.index
+        et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
+        mask = (((et_idx.hour == 9) & (et_idx.minute >= 30)) |
+                ((et_idx.hour > 9) & (et_idx.hour < 16)))
+        return df[mask]
+    except Exception:
+        return df
 
-def process_sentinel():
-    service = get_drive_service()
-    
-    # שימוש ב-Prefix המדויק שציינת
-    df_p = download_latest_file(service, "Smart_Priority")
-    if df_p is None:
-        send_msg("❌ שגיאה: לא נמצא קובץ Smart_Priority בדרייב. וודא שהקובץ קיים בתיקייה 2.")
-        return
 
-    # ניקוי רשימת הטיקרים
-    # ניקוי שמות העמודות (הסרת רווחים והפיכה לאותיות קטנות)
-    df_p.columns = df_p.columns.str.strip().str.lower()
-    
-    # חיפוש עמודת הטיקר (בדיקה של כמה שמות נפוצים)
-    possible_cols = ['symbol', 'ticker', 'tkr', 's']
-    symbol_col = next((c for c in possible_cols if c in df_p.columns), None)
-    
-    if not symbol_col:
-        print(f"❌ שגיאה: לא נמצאה עמודת מניות בקובץ. עמודות קיימות: {list(df_p.columns)}")
-        send_msg(f"❌ שגיאה טכנית: קובץ ה-Priority הגיע ללא עמודת symbol. עמודות שנמצאו: {list(df_p.columns)}")
-        return
-
-    tickers = df_p[symbol_col].dropna().unique().tolist()
-    
-    print(f"🚀 מוריד נתונים עבור {len(tickers)} מניות...")
-    # הורדה קבוצתית לביצועים מהירים
-    full_data = yf.download(tickers, period="7d", interval="5m", group_by='ticker', threads=True)
-    
-    # מדד ה-VIX
+def get_5m_rth(ticker, period="1d"):
     try:
-        vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-    except: vix = 0
-    
-    results = {"STOCKS": [], "ETF": []}
-    
-    for ticker in tickers:
-        try:
-            t_data = full_data[ticker].dropna()
-            if t_data.empty: continue
-            
-            curr_price = t_data['Close'].iloc[-1]
-            
-            # חישוב שינוי יומי (מפתיחת היום)
-            today_data = t_data[t_data.index.date == t_data.index[-1].date()]
-            day_open = today_data['Open'].iloc[0]
-            day_chg = ((curr_price / day_open) - 1) * 100
-            
-            # חישוב שינוי שבועי (מתחילת יום שני האחרון - תיקון הבאג)
-            monday_open = get_latest_monday_open(t_data)
-            wk_chg = ((curr_price / monday_open) - 1) * 100 if monday_open else 0
-            
-            score = df_p[df_p['symbol'] == ticker]['final_score'].values[0]
-            is_etf = df_p[df_p['symbol'] == ticker]['is_etf'].values[0]
-            
-            # פילטר ה-UnderDogs (צמיחה שבועית חזקה וציון איכות)
-            if wk_chg > 5 and score > 75:
-                cat = "ETF" if is_etf else "STOCKS"
-                results[cat].append((ticker, curr_price, day_chg, wk_chg, score))
-        except: continue
+        raw = yf.download(ticker, period=period, interval="5m", progress=False)
+        return filter_rth(raw)
+    except Exception:
+        return None
 
-    # בניית הדוח לטלגרם
-    report = f"🛰️ *WTC Sentinel Dashboard* | {datetime.datetime.now().strftime('%H:%M')}\n"
-    report += f"📊 *Market VIX:* `{vix:.2f}` {'⚠️' if vix > 22 else '✅'}\n"
-    report += "`-----------------------------`\n\n"
-    
-    for section in ["STOCKS", "ETF"]:
-        report += f"{'🥇' if section == 'STOCKS' else '🏅'} *{section}:*\n"
-        if results[section]:
-            report += "`TKR   | PRICE  | D%    | W%    | SC`\n"
-            # מיון לפי התשואה השבועית הגבוהה ביותר
-            sorted_res = sorted(results[section], key=lambda x: x[3], reverse=True)[:15]
-            for t, p, d, w, sc in sorted_res:
-                report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {int(sc)}`\n"
+
+def find_open_at_or_after(df, target_hour, target_minute):
+    if df is None or df.empty:
+        return None
+    open_s = extract_col(df, "Open")
+    if open_s is None or open_s.empty:
+        return None
+    idx = df.index
+    et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
+    for i, ts in enumerate(et_idx):
+        if ts.hour > target_hour or (ts.hour == target_hour and ts.minute >= target_minute):
+            return float(open_s.iloc[i])
+    return None
+
+
+def get_monday_10am_open(ticker):
+    try:
+        df = get_5m_rth(ticker, period="5d")
+        if df is None or df.empty:
+            return None
+        et_idx = df.index.tz_convert("America/New_York") if (hasattr(df.index, "tz") and df.index.tz) else df.index
+        monday_df = df[[ts.weekday() == 0 for ts in et_idx]]
+        return find_open_at_or_after(monday_df, 10, 0)
+    except Exception:
+        return None
+
+
+def build_dynamic_watchlist(service):
+    watchlist, logs = {}, []
+    for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
+        df, status = download_latest_file(service, prefix)
+        if df is not None:
+            clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
+            df = df.rename(columns=clean)
+            sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
+            tcol = next((c for c in df.columns if "ticker" in c), "ticker")
+            if sel:
+                mask = df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
+                for _, row in df[mask].iterrows():
+                    watchlist[str(row[tcol]).strip().upper()] = str(row[sel])
+                logs.append(f"✅ {prefix}: Found {mask.sum()}")
+            else:
+                logs.append(f"⚠️ {prefix}: Col missing")
         else:
-            report += "_לא נמצאו פריצות שבועיות_\n"
-        report += "\n"
+            logs.append(f"❌ {prefix}: {status}")
+    return watchlist, "\n".join(logs)
 
-    total = len(results["STOCKS"]) + len(results["ETF"])
-    if total > 0:
-        report += f"🚀 *סיכום:* {total} מניות אנדרדוג זוהו השבוע."
+
+def get_market_dashboard():
+    try:
+        spy_2d = yf.download("SPY", period="2d", interval="1d", progress=False)
+        spy_cls = extract_col(spy_2d, "Close")
+        s_p = float(spy_cls.iloc[-1])
+        prev_c = float(spy_cls.iloc[-2])
+        s_c = ((s_p / prev_c) - 1) * 100
+        v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+        status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
+        emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
+        return (
+            f"📊 *WTC Sentinel Dashboard*\n"
+            f"`--------------------------`\n"
+            f"🚦 *Status:* `{status}` {emoji}\n"
+            f"📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n"
+            f"`--------------------------`\n"
+        )
+    except Exception:
+        return "⚠️ Dashboard Offline\n\n"
+
+
+def get_portfolio_performance(watchlist):
+    if not watchlist:
+        return "⚠️ Watchlist empty\n"
+    report = "📈 *My Portfolio Watch (Dynamic)*\n"
+    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
+    report += "`--------------------------------------------------`\n"
+    for t, label in watchlist.items():
+        try:
+            d2 = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2 = extract_col(d2, "Close")
+            if cls_d2 is None or len(cls_d2) < 2:
+                report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
+                continue
+            curr_p = float(cls_d2.iloc[-1])
+            prev_p = float(cls_d2.iloc[-2])
+            day_chg = ((curr_p / prev_p) - 1) * 100
+            wk_open = get_monday_10am_open(t)
+            if wk_open is None:
+                wk_open = prev_p
+            wk_chg = ((curr_p / wk_open) - 1) * 100
+            status = "✅ Break" if wk_chg >= 0 else "❌ Below"
+            lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
+            report += (
+                f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
+                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            )
+        except Exception:
+            report += f"`{'Err':<8} | {t:<5} | N/A | N/A | N/A | ❌`\n"
+    report += "`--------------------------------------------------`\n"
+    return report + "\n"
+
+
+def get_ai_report(custom_prompt=None):
+    news = ""
+    for t in ["^GSPC", "^VIX"]:
+        try:
+            for n in yf.Ticker(t).news[:2]:
+                title = n.get("title") or n.get("content", {}).get("title")
+                if title:
+                    news += f"- {title}\n"
+        except Exception:
+            continue
+    prompt = custom_prompt if custom_prompt else (
+        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\n"
+        f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
+        f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+    )
+    try:
+        client = genai.Client(api_key=GEMINI_KEY)
+        target = next((m.name for m in client.models.list() if "flash" in m.name), "gemini-1.5-flash")
+        return client.models.generate_content(model=target, contents=prompt).text
+    except Exception:
+        return "⚠️ AI Summary Unavailable"
+
+
+def build_underdog_list(service):
+    underdogs = []
+    for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
+        df, _ = download_latest_file(service, prefix)
+        if df is None:
+            continue
+        clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
+        df = df.rename(columns=clean)
+        sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
+        tcol = next((c for c in df.columns if "ticker" in c), "ticker")
+        scol = next((c for c in df.columns if "score" in c), None)
+        if not sel or tcol not in df.columns:
+            continue
+        mask = ~df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
+        for _, row in df[mask].iterrows():
+            t = str(row[tcol]).strip().upper()
+            score = row.get(scol, "N/A") if scol else "N/A"
+            if t:
+                underdogs.append((t, bucket, score))
+    return underdogs
+
+
+def run_execution_scan(service):
+    underdogs = build_underdog_list(service)
+    res = {"STOCKS": [], "ETF": []}
+    for t, bucket, score in underdogs:
+        try:
+            d2 = yf.download(t, period="2d", interval="1d", progress=False)
+            cls_d2 = extract_col(d2, "Close")
+            if cls_d2 is None or len(cls_d2) < 2:
+                continue
+            curr_p = float(cls_d2.iloc[-1])
+            prev_p = float(cls_d2.iloc[-2])
+            day_chg = ((curr_p / prev_p) - 1) * 100
+            wk_open = get_monday_10am_open(t)
+            if wk_open is None:
+                continue
+            wk_chg = ((curr_p / wk_open) - 1) * 100
+            if wk_chg > 5:
+                res[bucket].append((t, curr_p, day_chg, wk_chg, score))
+        except Exception:
+            continue
+    res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
+    res["ETF"].sort(key=lambda x: x[3], reverse=True)
+    total = len(res["STOCKS"]) + len(res["ETF"])
+    v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+    report = "🎯 *Execution Scan — UnderRadar*\n"
+    report += "`-----------------------------`\n\n"
+    report += "🥇 *STOCKS:*\n"
+    if res["STOCKS"]:
+        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res["STOCKS"]:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
-        report += "💡 *סיכום:* אין כרגע פריצות שבועיות משמעותיות."
+        report += "_None_\n"
+    report += "\n🏅 *ETF:*\n"
+    if res["ETF"]:
+        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`-----------------------------------`\n"
+        for t, p, d, w, sc in res["ETF"]:
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
+    else:
+        report += "_None_\n"
+    report += "\n"
+    if total == 0:
+        report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
+        if v_p > 22:
+            report += " VIX גבוה — זהירות."
+    else:
+        report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
+    return report
 
-    send_msg(report)
+
+def main():
+    service = get_drive_service()
+    watchlist, drive_logs = build_dynamic_watchlist(service)
+    dashboard = get_market_dashboard()
+    dashboard += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
+    portfolio = get_portfolio_performance(watchlist)
+    ai_report = get_ai_report()
+    execution_scan = run_execution_scan(service)
+
+    send_msg(f"{dashboard}\n{portfolio}")
+    send_msg(ai_report)
+    send_msg(execution_scan)
+
 
 if __name__ == "__main__":
-    process_sentinel()
+    main()
