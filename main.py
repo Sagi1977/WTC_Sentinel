@@ -1,4 +1,3 @@
-
 import os
 import time
 import io
@@ -261,12 +260,12 @@ def yes_no(v):
 
 def classify_portfolio_status(day_chg, wk_chg):
     if wk_chg >= 2.0 and day_chg >= 0.7:
-        return "✅ Str"
+        return "✅ Strong"
     if wk_chg >= 1.0 and day_chg >= 0.2:
-        return "👀 Bld"
+        return "👀 Building"
     if wk_chg >= 0 or day_chg >= 0:
         return "⚠️ Weak"
-    return "❌ Bel"
+    return "❌ Below"
 
 
 def classify_execution_status(day_chg, wk_chg, current_price, prior_high, rel_volume, rs_vs_spy, above_vwap, rsi14):
@@ -277,15 +276,15 @@ def classify_execution_status(day_chg, wk_chg, current_price, prior_high, rel_vo
     vwap_ok = above_vwap is True
 
     if wk_chg >= 7.0 and day_chg >= 3.0 and relvol >= 1.2 and rs >= 1.0 and rsi >= 60:
-        return "⚠️ Ext"
+        return "⚠️ Extended"
 
     if breakout and wk_chg >= 3.0 and day_chg >= 0.8 and relvol >= 1.0 and rs >= 0.5 and vwap_ok and rsi >= 58:
-        return "🚀 Brk"
+        return "🚀 Breakout"
 
     if wk_chg >= 2.0 and day_chg >= 0.3 and relvol >= 1.0 and rs >= 0.5 and rsi >= 55:
-        return "👀 Wch"
+        return "👀 Watch"
 
-    return "❌ Bel"
+    return "❌ Below"
 
 
 def build_dynamic_watchlist(service):
@@ -342,7 +341,7 @@ def get_portfolio_performance(watchlist):
         return "⚠️ Watchlist empty\n"
 
     report = "📈 *My Portfolio Watch (Dynamic)*\n"
-    report += "`Type | Tick | Px | D% | W% | St`\n"
+    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
     report += "`--------------------------------------------------`\n"
 
     for t, label in watchlist.items():
@@ -424,8 +423,6 @@ def build_underdog_list(service):
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
     res = {"STOCKS": [], "ETF": []}
-    etf_checked = 0
-    etf_passed = 0
     spy_day_chg = get_spy_day_change()
 
     for t, bucket, score in underdogs:
@@ -453,15 +450,10 @@ def run_execution_scan(service):
                 rsi14=rsi14,
             )
 
-            if bucket == "ETF":
-                etf_checked += 1
-
-            if status != "❌ Bel":
+            if status != "❌ Below":
                 res[bucket].append((
                     t, curr_p, day_chg, wk_chg, score, rel_volume, rs_vs_spy, above_vwap, rsi14, status
                 ))
-                if bucket == "ETF":
-                    etf_passed += 1
         except Exception:
             continue
 
@@ -479,7 +471,7 @@ def run_execution_scan(service):
 
     report += "🥇 *STOCKS:*\n"
     if res["STOCKS"]:
-        report += "`Tick | Px | D% | W% | Sc | RV | RS | VW | RSI | St`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
         report += "`--------------------------------------------------------------------------`\n"
         for t, p, d, w, sc, rv, rs, av, rsi, st in res["STOCKS"]:
             report += (
@@ -491,7 +483,7 @@ def run_execution_scan(service):
 
     report += "\n🏅 *ETF:*\n"
     if res["ETF"]:
-        report += "`Tick | Px | D% | W% | Sc | RV | RS | VW | RSI | St`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
         report += "`--------------------------------------------------------------------------`\n"
         for t, p, d, w, sc, rv, rs, av, rsi, st in res["ETF"]:
             report += (
@@ -501,11 +493,7 @@ def run_execution_scan(service):
     else:
         report += "_None_\n"
 
-    # ETF Debug Line
-    etf_pct = 0 if etf_checked == 0 else (etf_passed / etf_checked * 100)
-    report += f"\n*ETF Debug:* `{etf_passed}/{etf_checked} passed ({etf_pct:.0f}%)`"
-
-    report += "\n\n"
+    report += "\n"
     if total == 0:
         report += "💡 *סיכום:* אין כרגע מועמדות UnderRadar עם אישור חי מספיק חזק."
         if v_p is not None and v_p > 22:
