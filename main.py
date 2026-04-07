@@ -5,7 +5,6 @@ import re
 import requests
 import pandas as pd
 import yfinance as yf
-import pytz
 import datetime
 import google.auth
 from googleapiclient.discovery import build
@@ -92,7 +91,7 @@ def filter_rth(df):
         return df
 
 
-def get_5m_rth(ticker, period="1d"):
+def get_5m_rth(ticker, period="5d"):
     try:
         raw = yf.download(ticker, period=period, interval="5m", progress=False, auto_adjust=False)
         return filter_rth(raw)
@@ -100,21 +99,7 @@ def get_5m_rth(ticker, period="1d"):
         return None
 
 
-def get_current_and_day_change(ticker):
-    try:
-        d2 = yf.download(ticker, period="2d", interval="1d", progress=False, auto_adjust=False)
-        cls_d2 = extract_col(d2, "Close")
-        if cls_d2 is None or len(cls_d2) < 2:
-            return None
-        curr_p = float(cls_d2.iloc[-1])
-        prev_p = float(cls_d2.iloc[-2])
-        day_chg = ((curr_p / prev_p) - 1) * 100
-        return curr_p, prev_p, day_chg
-    except Exception:
-        return None
-
-
-def get_week_metrics(ticker):
+def get_intraday_session_metrics(ticker):
     try:
         df = get_5m_rth(ticker, period="10d")
         if df is None or df.empty:
@@ -128,6 +113,22 @@ def get_week_metrics(ticker):
             return None
 
         latest_day = unique_dates[-1]
+        today_df = df[(dates == latest_day).values].copy()
+        if today_df.empty:
+            return None
+
+        open_today = extract_col(today_df, "Open")
+        close_today = extract_col(today_df, "Close")
+        high_today = extract_col(today_df, "High")
+        if open_today is None or close_today is None or high_today is None:
+            return None
+        if open_today.empty or close_today.empty or high_today.empty:
+            return None
+
+        day_open = float(open_today.iloc[0])
+        current_price = float(close_today.iloc[-1])
+        day_change = ((current_price / day_open) - 1) * 100
+
         monday = latest_day - datetime.timedelta(days=latest_day.weekday())
         week_dates = [d for d in unique_dates if monday <= d <= latest_day]
         if not week_dates:
@@ -139,50 +140,49 @@ def get_week_metrics(ticker):
         if week_df.empty or first_day_df.empty:
             return None
 
-        open_s = extract_col(first_day_df, "Open")
-        high_s = extract_col(week_df, "High")
-        close_s = extract_col(week_df, "Close")
-        if open_s is None or high_s is None or close_s is None:
-            return None
-        if open_s.empty or high_s.empty or close_s.empty:
+        open_week = extract_col(first_day_df, "Open")
+        high_week = extract_col(week_df, "High")
+        if open_week is None or high_week is None or open_week.empty or high_week.empty:
             return None
 
-        week_open = float(open_s.iloc[0])
-        current_price = float(close_s.iloc[-1])
+        week_open = float(open_week.iloc[0])
         week_change = ((current_price / week_open) - 1) * 100
-        prior_high = float(high_s.iloc[:-1].max()) if len(high_s) > 1 else float(high_s.iloc[0])
+        prior_high = float(high_week.iloc[:-1].max()) if len(high_week) > 1 else float(high_week.iloc[0])
 
         return {
-            "week_open": week_open,
             "current_price": current_price,
+            "day_open": day_open,
+            "day_change": day_change,
+            "week_open": week_open,
             "week_change": week_change,
             "prior_high": prior_high,
             "first_trading_day": first_trading_day,
+            "latest_day": latest_day,
         }
     except Exception:
         return None
 
 
 def get_monday_10am_open(ticker):
-    metrics = get_week_metrics(ticker)
+    metrics = get_intraday_session_metrics(ticker)
     if metrics is None:
         return None
     return metrics["week_open"]
 
 
 def classify_portfolio_status(day_chg, wk_chg):
-    if wk_chg >= 2 and day_chg >= 0:
+    if wk_chg >= 2 and day_chg >= 0.5:
         return "✅ Break"
     return "❌ Below"
 
 
 def classify_execution_status(day_chg, wk_chg, current_price, prior_high):
     breakout = current_price > (prior_high * 1.001)
-    if breakout and wk_chg >= 4 and day_chg >= 1:
+    if breakout and wk_chg >= 3 and day_chg >= 0.8:
         return "🚀 Breakout"
-    if wk_chg >= 8 and day_chg >= 4:
+    if wk_chg >= 7 and day_chg >= 3:
         return "⚠️ Extended"
-    if wk_chg >= 3 and day_chg >= 0.5:
+    if wk_chg >= 2 and day_chg >= 0.3:
         return "👀 Watch"
     return "❌ Below"
 
@@ -246,21 +246,17 @@ def get_portfolio_performance(watchlist):
 
     for t, label in watchlist.items():
         try:
-            day_data = get_current_and_day_change(t)
-            if day_data is None:
+            metrics = get_intraday_session_metrics(t)
+            if metrics is None:
                 report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
                 continue
 
-            curr_p, prev_p, day_chg = day_data
-            wk_metrics = get_week_metrics(t)
-            if wk_metrics is None:
-                wk_open = prev_p
-                wk_chg = ((curr_p / wk_open) - 1) * 100
-            else:
-                wk_chg = wk_metrics["week_change"]
-
+            curr_p = metrics["current_price"]
+            day_chg = metrics["day_change"]
+            wk_chg = metrics["week_change"]
             status = classify_portfolio_status(day_chg, wk_chg)
             lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
+
             report += (
                 f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
                 f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
@@ -331,21 +327,18 @@ def run_execution_scan(service):
 
     for t, bucket, score in underdogs:
         try:
-            day_data = get_current_and_day_change(t)
-            if day_data is None:
-                continue
-            curr_p, _, day_chg = day_data
-
-            wk_metrics = get_week_metrics(t)
-            if wk_metrics is None:
+            metrics = get_intraday_session_metrics(t)
+            if metrics is None:
                 continue
 
-            wk_chg = wk_metrics["week_change"]
+            curr_p = metrics["current_price"]
+            day_chg = metrics["day_change"]
+            wk_chg = metrics["week_change"]
             status = classify_execution_status(
                 day_chg=day_chg,
                 wk_chg=wk_chg,
                 current_price=curr_p,
-                prior_high=wk_metrics["prior_high"],
+                prior_high=metrics["prior_high"],
             )
 
             if status != "❌ Below":
