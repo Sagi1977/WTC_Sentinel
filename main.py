@@ -126,7 +126,7 @@ def compute_intraday_vwap(df):
     high_s = extract_col(df, "High")
     low_s = extract_col(df, "Low")
     vol_s = extract_col(df, "Volume")
-    if close_s is None or high_s is None or low_s is None or vol_s is None:
+    if any(x is None for x in [close_s, high_s, low_s, vol_s]):
         return None
     if close_s.empty or vol_s.empty:
         return None
@@ -140,24 +140,13 @@ def compute_intraday_vwap(df):
 
 def get_spy_day_change():
     try:
-        spy_df = get_5m_rth("SPY", period="5d")
-        if spy_df is None or spy_df.empty:
-            return None
-        idx = spy_df.index
-        et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
-        dates = pd.Series(et_idx.date, index=spy_df.index)
-        latest_day = list(pd.unique(dates))[-1]
-        today_df = spy_df[(dates == latest_day).values].copy()
-        open_s = extract_col(today_df, "Open")
-        close_s = extract_col(today_df, "Close")
-        if open_s is None or close_s is None or open_s.empty or close_s.empty:
-            return None
-        return ((float(close_s.iloc[-1]) / float(open_s.iloc[0])) - 1) * 100
+        metrics = get_intraday_session_metrics("SPY")
+        return None if metrics is None else metrics["day_change"]
     except Exception:
         return None
 
 
-def get_intraday_session_metrics(ticker, spy_day_chg=None):
+def get_intraday_session_metrics(ticker):
     try:
         df = get_5m_rth(ticker, period="10d")
         if df is None or df.empty:
@@ -189,10 +178,10 @@ def get_intraday_session_metrics(ticker, spy_day_chg=None):
         day_change = ((current_price / day_open) - 1) * 100
         today_volume = float(vol_today.sum())
         vwap = compute_intraday_vwap(today_df)
-        above_vwap = None if vwap is None else current_price > vwap
+        above_vwap = None if vwap is None else current_price >= vwap
 
-        monday = latest_day - datetime.timedelta(days=latest_day.weekday())
-        week_dates = [d for d in unique_dates if monday <= d <= latest_day]
+        week_start = latest_day - datetime.timedelta(days=latest_day.weekday())
+        week_dates = [d for d in unique_dates if week_start <= d <= latest_day]
         if not week_dates:
             return None
 
@@ -209,7 +198,12 @@ def get_intraday_session_metrics(ticker, spy_day_chg=None):
 
         week_open = float(open_week.iloc[0])
         week_change = ((current_price / week_open) - 1) * 100
-        prior_high = float(high_week.iloc[:-1].max()) if len(high_week) > 1 else float(high_week.iloc[0])
+
+        prior_high = None
+        if len(high_week) > 1:
+            prior_high = float(high_week.iloc[:-1].max())
+        elif len(high_week) == 1:
+            prior_high = float(high_week.iloc[0])
 
         daily_hist = get_daily_history(ticker, period="3mo")
         rel_volume = None
@@ -217,14 +211,16 @@ def get_intraday_session_metrics(ticker, spy_day_chg=None):
         if daily_hist is not None and not daily_hist.empty:
             vol_d = extract_col(daily_hist, "Volume")
             close_d = extract_col(daily_hist, "Close")
-            if vol_d is not None and len(vol_d.dropna()) >= 20:
-                avg20 = float(vol_d.dropna().tail(20).mean())
-                if avg20 > 0:
-                    rel_volume = today_volume / avg20
-            if close_d is not None and len(close_d.dropna()) >= 20:
-                rsi14 = compute_rsi(close_d.dropna(), period=14)
-
-        rs_vs_spy = None if spy_day_chg is None else (day_change - spy_day_chg)
+            if vol_d is not None:
+                vol_d = vol_d.dropna()
+                if len(vol_d) >= 20:
+                    avg20 = float(vol_d.tail(20).mean())
+                    if avg20 > 0:
+                        rel_volume = today_volume / avg20
+            if close_d is not None:
+                close_d = close_d.dropna()
+                if len(close_d) >= 20:
+                    rsi14 = compute_rsi(close_d, period=14)
 
         return {
             "current_price": current_price,
@@ -233,14 +229,11 @@ def get_intraday_session_metrics(ticker, spy_day_chg=None):
             "week_open": week_open,
             "week_change": week_change,
             "prior_high": prior_high,
-            "first_trading_day": first_trading_day,
-            "latest_day": latest_day,
             "today_volume": today_volume,
             "rel_volume": rel_volume,
             "vwap": vwap,
             "above_vwap": above_vwap,
             "rsi14": rsi14,
-            "rs_vs_spy": rs_vs_spy,
         }
     except Exception:
         return None
@@ -248,16 +241,14 @@ def get_intraday_session_metrics(ticker, spy_day_chg=None):
 
 def get_monday_10am_open(ticker):
     metrics = get_intraday_session_metrics(ticker)
-    if metrics is None:
-        return None
-    return metrics["week_open"]
+    return None if metrics is None else metrics["week_open"]
 
 
 def fmt_pct(v):
     return "N/A" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:+.1f}%"
 
 
-def fmt_num(v, digits=2):
+def fmt_num(v, digits=1):
     return "N/A" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:.{digits}f}"
 
 
@@ -268,9 +259,9 @@ def yes_no(v):
 
 
 def classify_portfolio_status(day_chg, wk_chg):
-    if wk_chg >= 2 and day_chg >= 0.7:
+    if wk_chg >= 2.0 and day_chg >= 0.7:
         return "✅ Strong"
-    if wk_chg >= 1 and day_chg >= 0.2:
+    if wk_chg >= 1.0 and day_chg >= 0.2:
         return "👀 Building"
     if wk_chg >= 0 or day_chg >= 0:
         return "⚠️ Weak"
@@ -279,19 +270,20 @@ def classify_portfolio_status(day_chg, wk_chg):
 
 def classify_execution_status(day_chg, wk_chg, current_price, prior_high, rel_volume, rs_vs_spy, above_vwap, rsi14):
     breakout = current_price > (prior_high * 1.001) if prior_high is not None else False
-    relvol_ok = rel_volume is not None and rel_volume >= 1.2
-    rs_ok = rs_vs_spy is not None and rs_vs_spy >= 0.5
+    relvol = rel_volume if rel_volume is not None else -1
+    rs = rs_vs_spy if rs_vs_spy is not None else -999
+    rsi = rsi14 if rsi14 is not None else -1
     vwap_ok = above_vwap is True
-    rsi_ok = rsi14 is not None and rsi14 >= 55
 
-    confirm_count = sum([relvol_ok, rs_ok, vwap_ok, rsi_ok])
-
-    if breakout and wk_chg >= 3 and day_chg >= 0.8 and confirm_count >= 3:
-        return "🚀 Breakout"
-    if wk_chg >= 7 and day_chg >= 3 and confirm_count >= 2:
+    if wk_chg >= 7.0 and day_chg >= 3.0 and relvol >= 1.2 and rs >= 1.0 and rsi >= 60:
         return "⚠️ Extended"
-    if wk_chg >= 2 and day_chg >= 0.3 and confirm_count >= 2:
+
+    if breakout and wk_chg >= 3.0 and day_chg >= 0.8 and relvol >= 1.0 and rs >= 0.5 and vwap_ok and rsi >= 58:
+        return "🚀 Breakout"
+
+    if wk_chg >= 2.0 and day_chg >= 0.3 and relvol >= 1.0 and rs >= 0.5 and rsi >= 55:
         return "👀 Watch"
+
     return "❌ Below"
 
 
@@ -380,8 +372,7 @@ def get_ai_report(custom_prompt=None):
     news = ""
     for t in ["^GSPC", "^VIX"]:
         try:
-            items = yf.Ticker(t).news[:2]
-            for n in items:
+            for n in yf.Ticker(t).news[:2]:
                 title = n.get("title") or n.get("content", {}).get("title")
                 if title:
                     news += f"- {title}\n"
@@ -436,7 +427,7 @@ def run_execution_scan(service):
 
     for t, bucket, score in underdogs:
         try:
-            metrics = get_intraday_session_metrics(t, spy_day_chg=spy_day_chg)
+            metrics = get_intraday_session_metrics(t)
             if metrics is None:
                 continue
 
@@ -444,9 +435,9 @@ def run_execution_scan(service):
             day_chg = metrics["day_change"]
             wk_chg = metrics["week_change"]
             rel_volume = metrics["rel_volume"]
-            rs_vs_spy = metrics["rs_vs_spy"]
             above_vwap = metrics["above_vwap"]
             rsi14 = metrics["rsi14"]
+            rs_vs_spy = None if spy_day_chg is None else (day_chg - spy_day_chg)
 
             status = classify_execution_status(
                 day_chg=day_chg,
@@ -461,8 +452,7 @@ def run_execution_scan(service):
 
             if status != "❌ Below":
                 res[bucket].append((
-                    t, curr_p, day_chg, wk_chg, score, status,
-                    rel_volume, rs_vs_spy, above_vwap, rsi14
+                    t, curr_p, day_chg, wk_chg, score, rel_volume, rs_vs_spy, above_vwap, rsi14, status
                 ))
         except Exception:
             continue
@@ -474,7 +464,7 @@ def run_execution_scan(service):
     try:
         v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
     except Exception:
-        v_p = 0.0
+        v_p = None
 
     report = "🎯 *Execution Scan — UnderRadar*\n"
     report += "`--------------------------------------------------------------------------`\n\n"
@@ -483,7 +473,7 @@ def run_execution_scan(service):
     if res["STOCKS"]:
         report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
         report += "`--------------------------------------------------------------------------`\n"
-        for t, p, d, w, sc, st, rv, rs, av, rsi in res["STOCKS"]:
+        for t, p, d, w, sc, rv, rs, av, rsi, st in res["STOCKS"]:
             report += (
                 f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | "
                 f"{fmt_num(rv, 1):>4} | {fmt_pct(rs):>5} | {yes_no(av):>4} | {fmt_num(rsi, 0):>3} | {st}`\n"
@@ -495,7 +485,7 @@ def run_execution_scan(service):
     if res["ETF"]:
         report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
         report += "`--------------------------------------------------------------------------`\n"
-        for t, p, d, w, sc, st, rv, rs, av, rsi in res["ETF"]:
+        for t, p, d, w, sc, rv, rs, av, rsi, st in res["ETF"]:
             report += (
                 f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | "
                 f"{fmt_num(rv, 1):>4} | {fmt_pct(rs):>5} | {yes_no(av):>4} | {fmt_num(rsi, 0):>3} | {st}`\n"
@@ -506,10 +496,10 @@ def run_execution_scan(service):
     report += "\n"
     if total == 0:
         report += "💡 *סיכום:* אין כרגע מועמדות UnderRadar עם אישור חי מספיק חזק."
-        if v_p > 22:
+        if v_p is not None and v_p > 22:
             report += " VIX גבוה — זהירות."
     else:
-        if v_p > 22:
+        if v_p is not None and v_p > 22:
             report += f"⚠️ *סיכום:* נמצאו {total} מועמדות, אבל VIX גבוה ולכן עדיף זהירות בביצוע."
         else:
             report += f"🚀 *סיכום:* נמצאו {total} מועמדות UnderRadar עם אישור חי של מומנטום, חוזק יחסי ונפח."
