@@ -2,6 +2,7 @@ import os
 import time
 import io
 import re
+import math
 import requests
 import pandas as pd
 import yfinance as yf
@@ -91,7 +92,7 @@ def filter_rth(df):
         return df
 
 
-def get_5m_rth(ticker, period="5d"):
+def get_5m_rth(ticker, period="10d"):
     try:
         raw = yf.download(ticker, period=period, interval="5m", progress=False, auto_adjust=False)
         return filter_rth(raw)
@@ -99,7 +100,64 @@ def get_5m_rth(ticker, period="5d"):
         return None
 
 
-def get_intraday_session_metrics(ticker):
+def get_daily_history(ticker, period="3mo"):
+    try:
+        return yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
+    except Exception:
+        return None
+
+
+def compute_rsi(series, period=14):
+    if series is None or len(series) < period + 1:
+        return None
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    val = rsi.iloc[-1]
+    return None if pd.isna(val) else float(val)
+
+
+def compute_intraday_vwap(df):
+    close_s = extract_col(df, "Close")
+    high_s = extract_col(df, "High")
+    low_s = extract_col(df, "Low")
+    vol_s = extract_col(df, "Volume")
+    if close_s is None or high_s is None or low_s is None or vol_s is None:
+        return None
+    if close_s.empty or vol_s.empty:
+        return None
+    typical = (high_s + low_s + close_s) / 3.0
+    cum_vol = vol_s.cumsum()
+    if float(cum_vol.iloc[-1]) <= 0:
+        return None
+    vwap = (typical * vol_s).cumsum() / cum_vol
+    return float(vwap.iloc[-1])
+
+
+def get_spy_day_change():
+    try:
+        spy_df = get_5m_rth("SPY", period="5d")
+        if spy_df is None or spy_df.empty:
+            return None
+        idx = spy_df.index
+        et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
+        dates = pd.Series(et_idx.date, index=spy_df.index)
+        latest_day = list(pd.unique(dates))[-1]
+        today_df = spy_df[(dates == latest_day).values].copy()
+        open_s = extract_col(today_df, "Open")
+        close_s = extract_col(today_df, "Close")
+        if open_s is None or close_s is None or open_s.empty or close_s.empty:
+            return None
+        return ((float(close_s.iloc[-1]) / float(open_s.iloc[0])) - 1) * 100
+    except Exception:
+        return None
+
+
+def get_intraday_session_metrics(ticker, spy_day_chg=None):
     try:
         df = get_5m_rth(ticker, period="10d")
         if df is None or df.empty:
@@ -120,14 +178,18 @@ def get_intraday_session_metrics(ticker):
         open_today = extract_col(today_df, "Open")
         close_today = extract_col(today_df, "Close")
         high_today = extract_col(today_df, "High")
-        if open_today is None or close_today is None or high_today is None:
+        vol_today = extract_col(today_df, "Volume")
+        if any(x is None for x in [open_today, close_today, high_today, vol_today]):
             return None
-        if open_today.empty or close_today.empty or high_today.empty:
+        if open_today.empty or close_today.empty or high_today.empty or vol_today.empty:
             return None
 
         day_open = float(open_today.iloc[0])
         current_price = float(close_today.iloc[-1])
         day_change = ((current_price / day_open) - 1) * 100
+        today_volume = float(vol_today.sum())
+        vwap = compute_intraday_vwap(today_df)
+        above_vwap = None if vwap is None else current_price > vwap
 
         monday = latest_day - datetime.timedelta(days=latest_day.weekday())
         week_dates = [d for d in unique_dates if monday <= d <= latest_day]
@@ -149,6 +211,21 @@ def get_intraday_session_metrics(ticker):
         week_change = ((current_price / week_open) - 1) * 100
         prior_high = float(high_week.iloc[:-1].max()) if len(high_week) > 1 else float(high_week.iloc[0])
 
+        daily_hist = get_daily_history(ticker, period="3mo")
+        rel_volume = None
+        rsi14 = None
+        if daily_hist is not None and not daily_hist.empty:
+            vol_d = extract_col(daily_hist, "Volume")
+            close_d = extract_col(daily_hist, "Close")
+            if vol_d is not None and len(vol_d.dropna()) >= 20:
+                avg20 = float(vol_d.dropna().tail(20).mean())
+                if avg20 > 0:
+                    rel_volume = today_volume / avg20
+            if close_d is not None and len(close_d.dropna()) >= 20:
+                rsi14 = compute_rsi(close_d.dropna(), period=14)
+
+        rs_vs_spy = None if spy_day_chg is None else (day_change - spy_day_chg)
+
         return {
             "current_price": current_price,
             "day_open": day_open,
@@ -158,6 +235,12 @@ def get_intraday_session_metrics(ticker):
             "prior_high": prior_high,
             "first_trading_day": first_trading_day,
             "latest_day": latest_day,
+            "today_volume": today_volume,
+            "rel_volume": rel_volume,
+            "vwap": vwap,
+            "above_vwap": above_vwap,
+            "rsi14": rsi14,
+            "rs_vs_spy": rs_vs_spy,
         }
     except Exception:
         return None
@@ -170,19 +253,44 @@ def get_monday_10am_open(ticker):
     return metrics["week_open"]
 
 
+def fmt_pct(v):
+    return "N/A" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:+.1f}%"
+
+
+def fmt_num(v, digits=2):
+    return "N/A" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:.{digits}f}"
+
+
+def yes_no(v):
+    if v is None:
+        return "N/A"
+    return "Y" if v else "N"
+
+
 def classify_portfolio_status(day_chg, wk_chg):
-    if wk_chg >= 2 and day_chg >= 0.5:
-        return "✅ Break"
+    if wk_chg >= 2 and day_chg >= 0.7:
+        return "✅ Strong"
+    if wk_chg >= 1 and day_chg >= 0.2:
+        return "👀 Building"
+    if wk_chg >= 0 or day_chg >= 0:
+        return "⚠️ Weak"
     return "❌ Below"
 
 
-def classify_execution_status(day_chg, wk_chg, current_price, prior_high):
-    breakout = current_price > (prior_high * 1.001)
-    if breakout and wk_chg >= 3 and day_chg >= 0.8:
+def classify_execution_status(day_chg, wk_chg, current_price, prior_high, rel_volume, rs_vs_spy, above_vwap, rsi14):
+    breakout = current_price > (prior_high * 1.001) if prior_high is not None else False
+    relvol_ok = rel_volume is not None and rel_volume >= 1.2
+    rs_ok = rs_vs_spy is not None and rs_vs_spy >= 0.5
+    vwap_ok = above_vwap is True
+    rsi_ok = rsi14 is not None and rsi14 >= 55
+
+    confirm_count = sum([relvol_ok, rs_ok, vwap_ok, rsi_ok])
+
+    if breakout and wk_chg >= 3 and day_chg >= 0.8 and confirm_count >= 3:
         return "🚀 Breakout"
-    if wk_chg >= 7 and day_chg >= 3:
+    if wk_chg >= 7 and day_chg >= 3 and confirm_count >= 2:
         return "⚠️ Extended"
-    if wk_chg >= 2 and day_chg >= 0.3:
+    if wk_chg >= 2 and day_chg >= 0.3 and confirm_count >= 2:
         return "👀 Watch"
     return "❌ Below"
 
@@ -324,25 +432,38 @@ def build_underdog_list(service):
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
     res = {"STOCKS": [], "ETF": []}
+    spy_day_chg = get_spy_day_change()
 
     for t, bucket, score in underdogs:
         try:
-            metrics = get_intraday_session_metrics(t)
+            metrics = get_intraday_session_metrics(t, spy_day_chg=spy_day_chg)
             if metrics is None:
                 continue
 
             curr_p = metrics["current_price"]
             day_chg = metrics["day_change"]
             wk_chg = metrics["week_change"]
+            rel_volume = metrics["rel_volume"]
+            rs_vs_spy = metrics["rs_vs_spy"]
+            above_vwap = metrics["above_vwap"]
+            rsi14 = metrics["rsi14"]
+
             status = classify_execution_status(
                 day_chg=day_chg,
                 wk_chg=wk_chg,
                 current_price=curr_p,
                 prior_high=metrics["prior_high"],
+                rel_volume=rel_volume,
+                rs_vs_spy=rs_vs_spy,
+                above_vwap=above_vwap,
+                rsi14=rsi14,
             )
 
             if status != "❌ Below":
-                res[bucket].append((t, curr_p, day_chg, wk_chg, score, status))
+                res[bucket].append((
+                    t, curr_p, day_chg, wk_chg, score, status,
+                    rel_volume, rs_vs_spy, above_vwap, rsi14
+                ))
         except Exception:
             continue
 
@@ -356,36 +477,42 @@ def run_execution_scan(service):
         v_p = 0.0
 
     report = "🎯 *Execution Scan — UnderRadar*\n"
-    report += "`--------------------------------------------------`\n\n"
+    report += "`--------------------------------------------------------------------------`\n\n"
 
     report += "🥇 *STOCKS:*\n"
     if res["STOCKS"]:
-        report += "`Ticker | Price | Day% | Wk% | Score | Status`\n"
-        report += "`--------------------------------------------------`\n"
-        for t, p, d, w, sc, st in res["STOCKS"]:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | {st}`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
+        report += "`--------------------------------------------------------------------------`\n"
+        for t, p, d, w, sc, st, rv, rs, av, rsi in res["STOCKS"]:
+            report += (
+                f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | "
+                f"{fmt_num(rv, 1):>4} | {fmt_pct(rs):>5} | {yes_no(av):>4} | {fmt_num(rsi, 0):>3} | {st}`\n"
+            )
     else:
         report += "_None_\n"
 
     report += "\n🏅 *ETF:*\n"
     if res["ETF"]:
-        report += "`Ticker | Price | Day% | Wk% | Score | Status`\n"
-        report += "`--------------------------------------------------`\n"
-        for t, p, d, w, sc, st in res["ETF"]:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | {st}`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP | RSI | Status`\n"
+        report += "`--------------------------------------------------------------------------`\n"
+        for t, p, d, w, sc, st, rv, rs, av, rsi in res["ETF"]:
+            report += (
+                f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5} | "
+                f"{fmt_num(rv, 1):>4} | {fmt_pct(rs):>5} | {yes_no(av):>4} | {fmt_num(rsi, 0):>3} | {st}`\n"
+            )
     else:
         report += "_None_\n"
 
     report += "\n"
     if total == 0:
-        report += "💡 *סיכום:* אין כרגע מניות UnderRadar עם שילוב מספיק חזק של Day% + Wk% לפריצה."
+        report += "💡 *סיכום:* אין כרגע מועמדות UnderRadar עם אישור חי מספיק חזק."
         if v_p > 22:
             report += " VIX גבוה — זהירות."
     else:
         if v_p > 22:
             report += f"⚠️ *סיכום:* נמצאו {total} מועמדות, אבל VIX גבוה ולכן עדיף זהירות בביצוע."
         else:
-            report += f"🚀 *סיכום:* נמצאו {total} מועמדות UnderRadar עם מומנטום שבועי ויומי חזק."
+            report += f"🚀 *סיכום:* נמצאו {total} מועמדות UnderRadar עם אישור חי של מומנטום, חוזק יחסי ונפח."
 
     return report
 
