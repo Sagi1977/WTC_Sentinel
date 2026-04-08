@@ -166,14 +166,19 @@ def get_portfolio_performance(watchlist):
     report += "`--------------------------------------------------`\n"
     for t, label in watchlist.items():
         try:
-            d2 = yf.download(t, period="2d", interval="1d", progress=False)
-            cls_d2 = extract_col(d2, "Close")
-            if cls_d2 is None or len(cls_d2) < 2:
+            d1 = yf.download(t, period="1d", interval="5m", progress=False)
+            d1 = filter_rth(d1)
+            close_s = extract_col(d1, "Close")
+            open_s = extract_col(d1, "Open")
+            if d1 is None or d1.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
                 report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
                 continue
-            curr_p = float(cls_d2.iloc[-1])
-            prev_p = float(cls_d2.iloc[-2])
-            day_chg = ((curr_p / prev_p) - 1) * 100
+            curr_p = float(close_s.iloc[-1])
+            day_open = float(open_s.iloc[0])
+            day_chg = ((curr_p / day_open) - 1) * 100
+            prev_close_df = yf.download(t, period="2d", interval="1d", progress=False)
+            prev_close_s = extract_col(prev_close_df, "Close")
+            prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else curr_p
             wk_open = get_monday_10am_open(t)
             if wk_open is None:
                 wk_open = prev_p
