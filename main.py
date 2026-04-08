@@ -1,4 +1,3 @@
-
 import os
 import time
 import io
@@ -16,7 +15,8 @@ from google import genai
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-BASE = f"https://api.telegram.org/bot{{TOKEN}}"
+BASE = f"https://api.telegram.org/bot{TOKEN}"
+
 
 def send_msg(text):
     if not text:
@@ -24,7 +24,7 @@ def send_msg(text):
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         try:
             requests.post(
-                f"{{BASE}}/sendMessage",
+                f"{BASE}/sendMessage",
                 json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "Markdown"},
                 timeout=10,
             )
@@ -32,14 +32,16 @@ def send_msg(text):
             pass
         time.sleep(0.5)
 
+
 def get_drive_service():
     creds, _ = google.auth.default()
     return build("drive", "v3", credentials=creds)
 
+
 def download_latest_file(service, prefix):
     try:
         res = service.files().list(
-            q=f"name contains '{{prefix}}'", orderBy="createdTime desc"
+            q=f"name contains '{prefix}'", orderBy="createdTime desc"
         ).execute()
         files = res.get("files", [])
         if not files:
@@ -49,7 +51,8 @@ def download_latest_file(service, prefix):
         fh.seek(0)
         return pd.read_csv(fh, encoding="utf-8-sig", engine="python"), "Loaded"
     except Exception as e:
-        return None, f"Err: {{str(e)[:30]}}"
+        return None, f"Err: {str(e)[:30]}"
+
 
 def extract_col(df, col_name):
     if df is None or df.empty:
@@ -65,6 +68,7 @@ def extract_col(df, col_name):
     except Exception:
         return None
 
+
 def filter_rth(df):
     if df is None or df.empty:
         return df
@@ -77,12 +81,14 @@ def filter_rth(df):
     except Exception:
         return df
 
+
 def get_5m_rth(ticker, period="10d"):
     try:
         raw = yf.download(ticker, period=period, interval="5m", progress=False)
         return filter_rth(raw)
     except Exception:
         return None
+
 
 def find_open_at_or_after(df, target_hour, target_minute):
     if df is None or df.empty:
@@ -97,21 +103,21 @@ def find_open_at_or_after(df, target_hour, target_minute):
             return float(open_s.iloc[i])
     return None
 
+
 def get_week_start_open(ticker):
-    """FIXED: First 10am+ bar of first trading day this week"""
     try:
         df = get_5m_rth(ticker, period="10d")
         if df is None or df.empty:
             return None
 
-        et_idx = df.index.tz_convert("America/New_York")
+        idx = df.index
+        et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
         trading_dates = pd.Series(et_idx.date, index=df.index)
         latest_date = trading_dates.iloc[-1]
-        monday_date = (latest_date - datetime.timedelta(days=latest_date.weekday())).date()
+        monday_date = latest_date - datetime.timedelta(days=latest_date.weekday())
 
         candidate_dates = sorted(set(trading_dates.tolist()))
         candidate_dates = [d for d in candidate_dates if d >= monday_date]
-        candidate_dates.sort()
 
         for d in candidate_dates:
             day_df = df[trading_dates == d]
@@ -122,12 +128,13 @@ def get_week_start_open(ticker):
     except Exception:
         return None
 
+
 def build_dynamic_watchlist(service):
-    watchlist, logs = {{}}, []
+    watchlist, logs = {}, []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is not None:
-            clean = {{c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}}
+            clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
             df = df.rename(columns=clean)
             sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
             tcol = next((c for c in df.columns if "ticker" in c), "ticker")
@@ -135,12 +142,14 @@ def build_dynamic_watchlist(service):
                 mask = df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
                 for _, row in df[mask].iterrows():
                     watchlist[str(row[tcol]).strip().upper()] = str(row[sel])
-                logs.append(f"✅ {{prefix}}: Found {{mask.sum()}}")
+                logs.append(f"✅ {prefix}: Found {mask.sum()}")
             else:
-                logs.append(f"⚠️ {{prefix}}: Col missing")
+                logs.append(f"⚠️ {prefix}: Col missing")
         else:
-            logs.append(f"❌ {{prefix}}: {{status}}")
-    return watchlist, "\n".join(logs)
+            logs.append(f"❌ {prefix}: {status}")
+    return watchlist, "
+".join(logs)
+
 
 def get_market_dashboard():
     try:
@@ -153,58 +162,85 @@ def get_market_dashboard():
         status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
         return (
-            f"📊 *WTC Sentinel Dashboard*\n"
-            f"`--------------------------`\n"
-            f"🚦 *Status:* `{{status}}` {{emoji}}\n"
-            f"📉 *VIX:* `{{v_p:.2f}}` | 📈 *SPY:* `{{s_p:.2f}} ({{s_c:+.2f}}%)`\n"
-            f"`--------------------------`\n"
+            f"📊 *WTC Sentinel Dashboard*
+"
+            f"`--------------------------`
+"
+            f"🚦 *Status:* `{status}` {emoji}
+"
+            f"📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`
+"
+            f"`--------------------------`
+"
         )
     except Exception:
-        return "⚠️ Dashboard Offline\n\n"
+        return "⚠️ Dashboard Offline
+
+"
+
 
 def get_portfolio_performance(watchlist):
     if not watchlist:
-        return "⚠️ Watchlist empty\n"
-    report = "📈 *My Portfolio Watch (Dynamic)*\n"
-    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
-    report += "`--------------------------------------------------`\n"
+        return "⚠️ Watchlist empty
+"
+    report = "📈 *My Portfolio Watch (Dynamic)*
+"
+    report += "`Type | Ticker | Price | Day% | Wk% | Status`
+"
+    report += "`--------------------------------------------------`
+"
     for t, label in watchlist.items():
         try:
             d2 = yf.download(t, period="2d", interval="1d", progress=False)
             cls_d2 = extract_col(d2, "Close")
             if cls_d2 is None or len(cls_d2) < 2:
-                report += f"`N/D | {{t:<5}} | N/A | N/A | N/A | ⚠️`\n"
+                report += f"`N/D | {t:<5} | N/A | N/A | N/A | ⚠️`
+"
                 continue
             curr_p = float(cls_d2.iloc[-1])
             prev_p = float(cls_d2.iloc[-2])
             day_chg = ((curr_p / prev_p) - 1) * 100
             wk_open = get_week_start_open(t)
             if wk_open is None:
-                report += f"`Err | {{t:<5}} | {{curr_p:>6.2f}} | {{day_chg:>+5.1f}}% | N/A | ⚠️`\n"
+                report += f"`Err | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | N/A | ⚠️`
+"
                 continue
             wk_chg = ((curr_p / wk_open) - 1) * 100
             status = "✅ Break" if wk_chg >= 0 else "❌ Below"
-            lbl = label[:8]
-            report += f"`{{lbl:<8}} | {{t:<5}} | {{curr_p:>6.2f}} | {{day_chg:>+5.1f}}% | {{wk_chg:>+5.1f}}% | {{status}}`\n"
+            lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
+            report += (
+                f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
+                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`
+"
+            )
         except Exception:
-            report += f"`Err | {{t:<5}} | N/A | N/A | N/A | ❌`\n"
-    report += "`--------------------------------------------------`\n"
-    return report + "\n"
+            report += f"`Err | {t:<5} | N/A | N/A | N/A | ❌`
+"
+    report += "`--------------------------------------------------`
+"
+    return report + "
+"
+
 
 def get_ai_report(custom_prompt=None):
     news = ""
     for t in ["^GSPC", "^VIX"]:
         try:
             for n in yf.Ticker(t).news[:2]:
-                title = n.get("title") or n.get("content", {{}}).get("title")
+                title = n.get("title") or n.get("content", {}).get("title")
                 if title:
-                    news += f"- {{title}}\n"
+                    news += f"- {title}
+"
         except Exception:
             continue
     prompt = custom_prompt if custom_prompt else (
-        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {{news}}\n"
-        f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
-        f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
+        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}
+"
+        f"מבנה: ## דוח אסטרטגי
+### 🏛️ 1. הכסף הגדול
+"
+        f"### 💣 2. מוקשים ומאקרו
+### 🌡️ 3. סנטימנט"
     )
     try:
         client = genai.Client(api_key=GEMINI_KEY)
@@ -213,13 +249,14 @@ def get_ai_report(custom_prompt=None):
     except Exception:
         return "⚠️ AI Summary Unavailable"
 
+
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
         df, _ = download_latest_file(service, prefix)
         if df is None:
             continue
-        clean = {{c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}}
+        clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
         df = df.rename(columns=clean)
         sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
         tcol = next((c for c in df.columns if "ticker" in c), "ticker")
@@ -234,9 +271,10 @@ def build_underdog_list(service):
                 underdogs.append((t, bucket, score))
     return underdogs
 
+
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
-    res = {{"STOCKS": [], "ETF": []}}
+    res = {"STOCKS": [], "ETF": []}
     for t, bucket, score in underdogs:
         try:
             d2 = yf.download(t, period="2d", interval="1d", progress=False)
@@ -258,45 +296,66 @@ def run_execution_scan(service):
     res["ETF"].sort(key=lambda x: x[3], reverse=True)
     total = len(res["STOCKS"]) + len(res["ETF"])
     v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-    report = "🎯 *Execution Scan — UnderRadar*\n"
-    report += "`-----------------------------`\n\n"
-    report += "🥇 *STOCKS:*\n"
+    report = "🎯 *Execution Scan — UnderRadar*
+"
+    report += "`-----------------------------`
+
+"
+    report += "🥇 *STOCKS:*
+"
     if res["STOCKS"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`\n"
-        report += "`-----------------------------------`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score`
+"
+        report += "`-----------------------------------`
+"
         for t, p, d, w, sc in res["STOCKS"]:
-            report += f"`{{t:<5}} | {{p:>6.2f}} | {{d:>+5.1f}}% | {{w:>+5.1f}}% | {{str(sc):<5}}`\n"
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`
+"
     else:
-        report += "_None_\n"
-    report += "\n🏅 *ETF:*\n"
+        report += "_None_
+"
+    report += "
+🏅 *ETF:*
+"
     if res["ETF"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`\n"
-        report += "`-----------------------------------`\n"
+        report += "`Ticker | Price | Day% | Wk% | Score`
+"
+        report += "`-----------------------------------`
+"
         for t, p, d, w, sc in res["ETF"]:
-            report += f"`{{t:<5}} | {{p:>6.2f}} | {{d:>+5.1f}}% | {{w:>+5.1f}}% | {{str(sc):<5}}`\n"
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`
+"
     else:
-        report += "_None_\n"
-    report += "\n"
+        report += "_None_
+"
+    report += "
+"
     if total == 0:
         report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
     if v_p > 22:
         report += " VIX גבוה — זהירות."
     else:
-        report += f"🚀 *סיכום:* {{total}} הזדמנויות מתחת לרדאר עם Wk% > +5%."
+        report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
     return report
+
 
 def main():
     service = get_drive_service()
     watchlist, drive_logs = build_dynamic_watchlist(service)
     dashboard = get_market_dashboard()
-    dashboard += f"\n🔍 *Diagnostics:*\n`{{drive_logs}}`\n"
+    dashboard += f"
+🔍 *Diagnostics:*
+`{drive_logs}`
+"
     portfolio = get_portfolio_performance(watchlist)
     ai_report = get_ai_report()
     execution_scan = run_execution_scan(service)
 
-    send_msg(f"{{dashboard}}\n{{portfolio}}")
+    send_msg(f"{dashboard}
+{portfolio}")
     send_msg(ai_report)
     send_msg(execution_scan)
+
 
 if __name__ == "__main__":
     main()
