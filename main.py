@@ -212,29 +212,6 @@ def get_portfolio_performance(watchlist):
     return report + "\n"
 
 
-def get_ai_report(custom_prompt=None):
-    news = ""
-    for t in ["^GSPC", "^VIX"]:
-        try:
-            for n in yf.Ticker(t).news[:2]:
-                title = n.get("title") or n.get("content", {}).get("title")
-                if title:
-                    news += f"- {title}\n"
-        except Exception:
-            continue
-    prompt = custom_prompt if custom_prompt else (
-        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\n"
-        f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
-        f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
-    )
-    try:
-        client = genai.Client(api_key=GEMINI_KEY)
-        target = next((m.name for m in client.models.list() if "flash" in m.name), "gemini-1.5-flash")
-        return client.models.generate_content(model=target, contents=prompt).text
-    except Exception:
-        return "⚠️ AI Summary Unavailable"
-
-
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
