@@ -166,16 +166,33 @@ def get_portfolio_performance(watchlist):
     report += "`--------------------------------------------------`\n"
     for t, label in watchlist.items():
         try:
+            ticker_obj = yf.Ticker(t)
             d1 = yf.download(t, period="1d", interval="5m", progress=False)
             d1 = filter_rth(d1)
             close_s = extract_col(d1, "Close")
-            open_s = extract_col(d1, "Open")
-            if d1 is None or d1.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
+            if d1 is None or d1.empty or close_s is None or close_s.empty:
                 report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
                 continue
             curr_p = float(close_s.iloc[-1])
-            day_open = float(open_s.iloc[0])
-            day_chg = ((curr_p / day_open) - 1) * 100
+            day_open = None
+            try:
+                fi = ticker_obj.fast_info
+                day_open = fi.get("open", None) or fi.get("regularMarketOpen", None)
+            except Exception:
+                pass
+            if day_open is None:
+                try:
+                    info = ticker_obj.info
+                    day_open = info.get("open", None) or info.get("regularMarketOpen", None)
+                except Exception:
+                    pass
+            if day_open is None:
+                open_s = extract_col(d1, "Open")
+                if open_s is None or open_s.empty:
+                    report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
+                    continue
+                day_open = float(open_s.iloc[0])
+            day_chg = ((curr_p / float(day_open)) - 1) * 100
             prev_close_df = yf.download(t, period="2d", interval="1d", progress=False)
             prev_close_s = extract_col(prev_close_df, "Close")
             prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else curr_p
@@ -245,17 +262,31 @@ def run_execution_scan(service):
     res = {"STOCKS": [], "ETF": []}
     for t, bucket, score in underdogs:
         try:
+            ticker_obj = yf.Ticker(t)
             d1 = yf.download(t, period="1d", interval="5m", progress=False)
             d1 = filter_rth(d1)
-            if d1 is None or d1.empty:
-                continue
             close_s = extract_col(d1, "Close")
-            open_s = extract_col(d1, "Open")
-            if close_s is None or close_s.empty or open_s is None or open_s.empty:
+            if d1 is None or d1.empty or close_s is None or close_s.empty:
                 continue
             curr_p = float(close_s.iloc[-1])
-            day_open = float(open_s.iloc[0])
-            day_chg = ((curr_p / day_open) - 1) * 100
+            day_open = None
+            try:
+                fi = ticker_obj.fast_info
+                day_open = fi.get("open", None) or fi.get("regularMarketOpen", None)
+            except Exception:
+                pass
+            if day_open is None:
+                try:
+                    info = ticker_obj.info
+                    day_open = info.get("open", None) or info.get("regularMarketOpen", None)
+                except Exception:
+                    pass
+            if day_open is None:
+                open_s = extract_col(d1, "Open")
+                if open_s is None or open_s.empty:
+                    continue
+                day_open = float(open_s.iloc[0])
+            day_chg = ((curr_p / float(day_open)) - 1) * 100
             wk_open = get_monday_10am_open(t)
             if wk_open is None:
                 continue
