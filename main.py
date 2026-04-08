@@ -16,8 +16,7 @@ from google import genai
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-BASE = f"https://api.telegram.org/bot{TOKEN}"
-
+BASE = f"https://api.telegram.org/bot{{TOKEN}}"
 
 def send_msg(text):
     if not text:
@@ -25,7 +24,7 @@ def send_msg(text):
     for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
         try:
             requests.post(
-                f"{BASE}/sendMessage",
+                f"{{BASE}}/sendMessage",
                 json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "Markdown"},
                 timeout=10,
             )
@@ -33,16 +32,14 @@ def send_msg(text):
             pass
         time.sleep(0.5)
 
-
 def get_drive_service():
     creds, _ = google.auth.default()
     return build("drive", "v3", credentials=creds)
 
-
 def download_latest_file(service, prefix):
     try:
         res = service.files().list(
-            q=f"name contains '{prefix}'", orderBy="createdTime desc"
+            q=f"name contains '{{prefix}}'", orderBy="createdTime desc"
         ).execute()
         files = res.get("files", [])
         if not files:
@@ -52,8 +49,7 @@ def download_latest_file(service, prefix):
         fh.seek(0)
         return pd.read_csv(fh, encoding="utf-8-sig", engine="python"), "Loaded"
     except Exception as e:
-        return None, f"Err: {str(e)[:30]}"
-
+        return None, f"Err: {{str(e)[:30]}}"
 
 def extract_col(df, col_name):
     if df is None or df.empty:
@@ -69,7 +65,6 @@ def extract_col(df, col_name):
     except Exception:
         return None
 
-
 def filter_rth(df):
     if df is None or df.empty:
         return df
@@ -82,14 +77,12 @@ def filter_rth(df):
     except Exception:
         return df
 
-
 def get_5m_rth(ticker, period="10d"):
     try:
         raw = yf.download(ticker, period=period, interval="5m", progress=False)
         return filter_rth(raw)
     except Exception:
         return None
-
 
 def find_open_at_or_after(df, target_hour, target_minute):
     if df is None or df.empty:
@@ -103,7 +96,6 @@ def find_open_at_or_after(df, target_hour, target_minute):
         if ts.hour > target_hour or (ts.hour == target_hour and ts.minute >= target_minute):
             return float(open_s.iloc[i])
     return None
-
 
 def get_week_start_open(ticker):
     """FIXED: First 10am+ bar of first trading day this week"""
@@ -130,9 +122,8 @@ def get_week_start_open(ticker):
     except Exception:
         return None
 
-
 def build_dynamic_watchlist(service):
-    watchlist, logs = {}, []
+    watchlist, logs = {{}}, []
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is not None:
@@ -150,7 +141,6 @@ def build_dynamic_watchlist(service):
         else:
             logs.append(f"❌ {{prefix}}: {{status}}")
     return watchlist, "\n".join(logs)
-
 
 def get_market_dashboard():
     try:
@@ -172,7 +162,6 @@ def get_market_dashboard():
     except Exception:
         return "⚠️ Dashboard Offline\n\n"
 
-
 def get_portfolio_performance(watchlist):
     if not watchlist:
         return "⚠️ Watchlist empty\n"
@@ -184,34 +173,30 @@ def get_portfolio_performance(watchlist):
             d2 = yf.download(t, period="2d", interval="1d", progress=False)
             cls_d2 = extract_col(d2, "Close")
             if cls_d2 is None or len(cls_d2) < 2:
-                report += f"`{{'N/D':<8}} | {{t:<5}} | N/A | N/A | N/A | ⚠️`\n"
+                report += f"`N/D | {{t:<5}} | N/A | N/A | N/A | ⚠️`\n"
                 continue
             curr_p = float(cls_d2.iloc[-1])
             prev_p = float(cls_d2.iloc[-2])
             day_chg = ((curr_p / prev_p) - 1) * 100
             wk_open = get_week_start_open(t)
             if wk_open is None:
-                report += f"`{{'Err':<8}} | {{t:<5}} | {{curr_p:>6.2f}} | {{day_chg:>+5.1f}}% | N/A | ⚠️`\n"
+                report += f"`Err | {{t:<5}} | {{curr_p:>6.2f}} | {{day_chg:>+5.1f}}% | N/A | ⚠️`\n"
                 continue
             wk_chg = ((curr_p / wk_open) - 1) * 100
             status = "✅ Break" if wk_chg >= 0 else "❌ Below"
-            lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
-            report += (
-                f"`{{lbl:<8}} | {{t:<5}} | {{curr_p:>6.2f}} | "
-                f"{{day_chg:>+5.1f}}% | {{wk_chg:>+5.1f}}% | {{status}}`\n"
-            )
+            lbl = label[:8]
+            report += f"`{{lbl:<8}} | {{t:<5}} | {{curr_p:>6.2f}} | {{day_chg:>+5.1f}}% | {{wk_chg:>+5.1f}}% | {{status}}`\n"
         except Exception:
-            report += f"`{{'Err':<8}} | {{t:<5}} | N/A | N/A | N/A | ❌`\n"
+            report += f"`Err | {{t:<5}} | N/A | N/A | N/A | ❌`\n"
     report += "`--------------------------------------------------`\n"
     return report + "\n"
-
 
 def get_ai_report(custom_prompt=None):
     news = ""
     for t in ["^GSPC", "^VIX"]:
         try:
             for n in yf.Ticker(t).news[:2]:
-                title = n.get("title") or n.get("content", {}).get("title")
+                title = n.get("title") or n.get("content", {{}}).get("title")
                 if title:
                     news += f"- {{title}}\n"
         except Exception:
@@ -227,7 +212,6 @@ def get_ai_report(custom_prompt=None):
         return client.models.generate_content(model=target, contents=prompt).text
     except Exception:
         return "⚠️ AI Summary Unavailable"
-
 
 def build_underdog_list(service):
     underdogs = []
@@ -249,7 +233,6 @@ def build_underdog_list(service):
             if t:
                 underdogs.append((t, bucket, score))
     return underdogs
-
 
 def run_execution_scan(service):
     underdogs = build_underdog_list(service)
@@ -302,7 +285,6 @@ def run_execution_scan(service):
         report += f"🚀 *סיכום:* {{total}} הזדמנויות מתחת לרדאר עם Wk% > +5%."
     return report
 
-
 def main():
     service = get_drive_service()
     watchlist, drive_logs = build_dynamic_watchlist(service)
@@ -315,7 +297,6 @@ def main():
     send_msg(f"{{dashboard}}\n{{portfolio}}")
     send_msg(ai_report)
     send_msg(execution_scan)
-
 
 if __name__ == "__main__":
     main()
