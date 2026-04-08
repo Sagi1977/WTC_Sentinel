@@ -147,8 +147,7 @@ def build_dynamic_watchlist(service):
                 logs.append(f"⚠️ {prefix}: Col missing")
         else:
             logs.append(f"❌ {prefix}: {status}")
-    return watchlist, "
-".join(logs)
+    return watchlist, "\n".join(logs)
 
 
 def get_market_dashboard():
@@ -162,64 +161,47 @@ def get_market_dashboard():
         status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
         return (
-            f"📊 *WTC Sentinel Dashboard*
-"
-            f"`--------------------------`
-"
-            f"🚦 *Status:* `{status}` {emoji}
-"
-            f"📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`
-"
-            f"`--------------------------`
-"
+            f"📊 *WTC Sentinel Dashboard*\n"
+            f"`--------------------------`\n"
+            f"🚦 *Status:* `{status}` {emoji}\n"
+            f"📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n"
+            f"`--------------------------`\n"
         )
     except Exception:
-        return "⚠️ Dashboard Offline
-
-"
+        return "⚠️ Dashboard Offline\n\n"
 
 
 def get_portfolio_performance(watchlist):
     if not watchlist:
-        return "⚠️ Watchlist empty
-"
-    report = "📈 *My Portfolio Watch (Dynamic)*
-"
-    report += "`Type | Ticker | Price | Day% | Wk% | Status`
-"
-    report += "`--------------------------------------------------`
-"
+        return "⚠️ Watchlist empty\n"
+    report = "📈 *My Portfolio Watch (Dynamic)*\n"
+    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
+    report += "`--------------------------------------------------`\n"
     for t, label in watchlist.items():
         try:
             d2 = yf.download(t, period="2d", interval="1d", progress=False)
             cls_d2 = extract_col(d2, "Close")
             if cls_d2 is None or len(cls_d2) < 2:
-                report += f"`N/D | {t:<5} | N/A | N/A | N/A | ⚠️`
-"
+                report += f"`N/D | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
                 continue
             curr_p = float(cls_d2.iloc[-1])
             prev_p = float(cls_d2.iloc[-2])
             day_chg = ((curr_p / prev_p) - 1) * 100
             wk_open = get_week_start_open(t)
             if wk_open is None:
-                report += f"`Err | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | N/A | ⚠️`
-"
+                report += f"`Err | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | N/A | ⚠️`\n"
                 continue
             wk_chg = ((curr_p / wk_open) - 1) * 100
             status = "✅ Break" if wk_chg >= 0 else "❌ Below"
             lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
             report += (
                 f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
-                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`
-"
+                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
             )
         except Exception:
-            report += f"`Err | {t:<5} | N/A | N/A | N/A | ❌`
-"
-    report += "`--------------------------------------------------`
-"
-    return report + "
-"
+            report += f"`Err | {t:<5} | N/A | N/A | N/A | ❌`\n"
+    report += "`--------------------------------------------------`\n"
+    return report + "\n"
 
 
 def get_ai_report(custom_prompt=None):
@@ -229,18 +211,13 @@ def get_ai_report(custom_prompt=None):
             for n in yf.Ticker(t).news[:2]:
                 title = n.get("title") or n.get("content", {}).get("title")
                 if title:
-                    news += f"- {title}
-"
+                    news += f"- {title}\n"
         except Exception:
             continue
     prompt = custom_prompt if custom_prompt else (
-        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}
-"
-        f"מבנה: ## דוח אסטרטגי
-### 🏛️ 1. הכסף הגדול
-"
-        f"### 💣 2. מוקשים ומאקרו
-### 🌡️ 3. סנטימנט"
+        f"ענה בעברית כמחלקת מחקר גולדמן סאקס. נתח: {news}\n"
+        f"מבנה: ## דוח אסטרטגי\n### 🏛️ 1. הכסף הגדול\n"
+        f"### 💣 2. מוקשים ומאקרו\n### 🌡️ 3. סנטימנט"
     )
     try:
         client = genai.Client(api_key=GEMINI_KEY)
@@ -296,40 +273,25 @@ def run_execution_scan(service):
     res["ETF"].sort(key=lambda x: x[3], reverse=True)
     total = len(res["STOCKS"]) + len(res["ETF"])
     v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-    report = "🎯 *Execution Scan — UnderRadar*
-"
-    report += "`-----------------------------`
-
-"
-    report += "🥇 *STOCKS:*
-"
+    report = "🎯 *Execution Scan — UnderRadar*\n"
+    report += "`-----------------------------`\n\n"
+    report += "🥇 *STOCKS:*\n"
     if res["STOCKS"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`
-"
-        report += "`-----------------------------------`
-"
+        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`-----------------------------------`\n"
         for t, p, d, w, sc in res["STOCKS"]:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`
-"
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
-        report += "_None_
-"
-    report += "
-🏅 *ETF:*
-"
+        report += "_None_\n"
+    report += "\n🏅 *ETF:*\n"
     if res["ETF"]:
-        report += "`Ticker | Price | Day% | Wk% | Score`
-"
-        report += "`-----------------------------------`
-"
+        report += "`Ticker | Price | Day% | Wk% | Score`\n"
+        report += "`-----------------------------------`\n"
         for t, p, d, w, sc in res["ETF"]:
-            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`
-"
+            report += f"`{t:<5} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {str(sc):<5}`\n"
     else:
-        report += "_None_
-"
-    report += "
-"
+        report += "_None_\n"
+    report += "\n"
     if total == 0:
         report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
     if v_p > 22:
@@ -343,16 +305,12 @@ def main():
     service = get_drive_service()
     watchlist, drive_logs = build_dynamic_watchlist(service)
     dashboard = get_market_dashboard()
-    dashboard += f"
-🔍 *Diagnostics:*
-`{drive_logs}`
-"
+    dashboard += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
     portfolio = get_portfolio_performance(watchlist)
     ai_report = get_ai_report()
     execution_scan = run_execution_scan(service)
 
-    send_msg(f"{dashboard}
-{portfolio}")
+    send_msg(f"{dashboard}\n{portfolio}")
     send_msg(ai_report)
     send_msg(execution_scan)
 
