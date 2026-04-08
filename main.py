@@ -310,11 +310,9 @@ def main():
     dashboard = get_market_dashboard()
     dashboard += f"\n🔍 *Diagnostics:*\n`{drive_logs}`\n"
     portfolio = get_portfolio_performance(watchlist)
-    ai_report = get_ai_report()
     execution_scan = run_execution_scan(service)
 
     send_msg(f"{dashboard}\n{portfolio}")
-    send_msg(ai_report)
     send_msg(execution_scan)
 
 
