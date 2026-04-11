@@ -265,15 +265,16 @@ def run_execution_scan(service):
                 rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
 
                 # Status for Execution Scan
-                # 🚀 Brk = strongest actionable setup now
-                # 👀 Wch = interesting, but needs more confirmation
-                # ⚠️ Ext = strong but already stretched; wait for pullback/retest
-                # ❌ Bel = below actionable threshold for now
-                if vwap_pct >= 1.5 and rsi >= 68 and rvol >= 1.5 and rs > 0:
+                # Priority matters:
+                # 1) Ext = strong weekly move already stretched or late
+                # 2) Brk = strongest actionable setup now
+                # 3) Wch = interesting, but needs more confirmation
+                # 4) Bel = below actionable threshold for now
+                if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
                     status = "⚠️ Ext"
-                elif vwap_pct >= 0 and vwap_pct < 1.5 and rsi >= 58 and rvol >= 1.2 and rs > 0:
+                elif rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
                     status = "🚀 Brk"
-                elif rsi >= 50 and rs >= 0 and vwap_pct > -1.0:
+                elif (wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0)):
                     status = "👀 Wch"
                 else:
                     status = "❌ Bel"
