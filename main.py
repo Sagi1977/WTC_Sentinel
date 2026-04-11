@@ -188,7 +188,16 @@ def get_portfolio_performance(watchlist):
             if wk_open is None:
                 wk_open = prev_p
             wk_chg = ((curr_p / wk_open) - 1) * 100
-            status = "✅ Break" if wk_chg >= 0 else "❌ Below"
+
+            if wk_chg >= 8 and day_chg >= 1:
+                status = "✅ Str"
+            elif wk_chg >= 3 and day_chg >= 0:
+                status = "👀 Bld"
+            elif wk_chg >= 0 or day_chg > -2:
+                status = "⚠️ Weak"
+            else:
+                status = "❌ Bel"
+
             lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
             report += (
                 f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
@@ -264,17 +273,12 @@ def run_execution_scan(service):
                 rs_i = gain / loss
                 rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
 
-                # Status for Execution Scan
-                # Priority matters:
-                # 1) Ext = strong weekly move already stretched or late
-                # 2) Brk = strongest actionable setup now
-                # 3) Wch = interesting, but needs more confirmation
-                # 4) Bel = below actionable threshold for now
+                # Status for Execution Scan (signal-oriented)
                 if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
                     status = "⚠️ Ext"
                 elif rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
                     status = "🚀 Brk"
-                elif (wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0)):
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
                     status = "👀 Wch"
                 else:
                     status = "❌ Bel"
