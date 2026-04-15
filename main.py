@@ -52,16 +52,33 @@ def download_latest_file(service, prefix):
         return None, f"Err: {str(e)[:30]}"
 
 def extract_col(df, col_name):
-    if df is None or df.empty:
+    if df is None or getattr(df, "empty", False):
         return None
     try:
+        if not hasattr(df, "columns"):
+            return None
         if isinstance(df.columns, pd.MultiIndex):
             lvl = df.columns.get_level_values(0)
             if col_name not in lvl:
                 return None
             result = df[col_name]
-            return result.squeeze() if isinstance(result, pd.DataFrame) else result
-        return df[col_name] if col_name in df.columns else None
+            if isinstance(result, pd.DataFrame):
+                if result.shape[1] == 0:
+                    return None
+                result = result.iloc[:, 0]
+            if np.isscalar(result):
+                result = pd.Series([result])
+            return result
+        if col_name not in df.columns:
+            return None
+        result = df[col_name]
+        if isinstance(result, pd.DataFrame):
+            if result.shape[1] == 0:
+                return None
+            result = result.iloc[:, 0]
+        if np.isscalar(result):
+            result = pd.Series([result])
+        return result
     except Exception:
         return None
 
@@ -79,7 +96,7 @@ def filter_rth(df):
 
 def get_5m_rth(ticker, period="1d"):
     try:
-        raw = yf.download(ticker, period=period, interval="5m", progress=False)
+        raw = yf.download(ticker, period=period, interval="5m", progress=False, auto_adjust=False)
         return filter_rth(raw)
     except Exception:
         return None
@@ -98,27 +115,40 @@ def get_latest_rth_session(ticker, period="5d"):
         return None
 
 def find_open_at_or_after(df, target_hour, target_minute):
-    if df is None or df.empty:
+    if df is None or getattr(df, "empty", False):
         return None
     open_s = extract_col(df, "Open")
-    if open_s is None or open_s.empty:
+    if open_s is None or getattr(open_s, "empty", False):
         return None
     idx = df.index
     et_idx = idx.tz_convert("America/New_York") if (hasattr(idx, "tz") and idx.tz) else idx
     for i, ts in enumerate(et_idx):
         if ts.hour > target_hour or (ts.hour == target_hour and ts.minute >= target_minute):
-            return float(open_s.iloc[i])
+            try:
+                return float(open_s.iloc[i])
+            except Exception:
+                try:
+                    return float(open_s.iloc[-1])
+                except Exception:
+                    return None
     return None
 
 def get_week_start_open(ticker):
     try:
-        df = get_5m_rth(ticker, period="5d")
+        df = get_5m_rth(ticker, period="1mo")
         if df is None or df.empty:
             return None
         et_idx = df.index.tz_convert("America/New_York") if (hasattr(df.index, "tz") and df.index.tz) else df.index
-        session_dates = pd.Series(et_idx.date, index=df.index)
+        week_keys = pd.Index([d.isocalendar()[:2] for d in pd.to_datetime(et_idx).date])
+        current_week = week_keys[-1]
+        week_mask = week_keys == current_week
+        week_df = df[week_mask]
+        if week_df is None or week_df.empty:
+            return None
+        week_et_idx = week_df.index.tz_convert("America/New_York") if (hasattr(week_df.index, "tz") and week_df.index.tz) else week_df.index
+        session_dates = pd.Series(week_et_idx.date, index=week_df.index)
         first_date = session_dates.iloc[0]
-        first_session = df[session_dates == first_date]
+        first_session = week_df[session_dates == first_date]
         return find_open_at_or_after(first_session, 9, 30)
     except Exception:
         return None
@@ -269,11 +299,14 @@ def run_execution_scan(service):
                 vwap_pct = ((curr_p / vwap) - 1) * 100
 
                 # RSI(14)
-                delta = close_s.diff()
-                gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs_i = gain / loss
-                rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
+                if hasattr(close_s, "diff") and len(close_s) >= 15:
+                    delta = close_s.diff()
+                    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs_i = gain / loss
+                    rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
+                else:
+                    rsi = 50
 
                 # Status for Execution Scan (signal-oriented)
                 if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
