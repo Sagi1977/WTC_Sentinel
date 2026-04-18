@@ -427,49 +427,33 @@ def compute_execution_rows(service):
 
 def build_execution_report(service):
     rows = compute_execution_rows(service)
-    report = "🎯 *Execution Scan — UnderRadar*\\n"
-    report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status | Rank`\\n"
-    report += "`----------------------------------------------------------------------------------------------------`\\n\\n"
-
-    report += "🥇 *STOCKS:*\\n"
+    lines = []
+    lines.append('🎯 *Execution Scan — UnderRadar*')
+    lines.append('```')
+    lines.append('Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status | Rank')
+    lines.append('----------------------------------------------------------------------------------------------------')
+    lines.append('')
+    lines.append('STOCKS:')
     if rows["STOCKS"]:
         for row in rows["STOCKS"]:
-            report += (
-                f"`{row['ticker']:<6} | "
-                f"{row['price']:>6.2f} | "
-                f"{row['day']:>+5.1f}% | "
-                f"{row['wk']:>+5.1f}% | "
-                f"{row['score']:>5.1f} | "
-                f"{row['rvol']:>4.1f}x | "
-                f"{row['rs']:>+4.1f} | "
-                f"{row['vwap']:>+4.1f}% | "
-                f"{row['rsi']:>3.0f} | "
-                f"{row['status']:<4} | "
-                f"{row['rank']:>5.2f}`\\n"
+            lines.append(
+                f"{row['ticker']:<6} | {row['price']:>6.2f} | {row['day']:>+5.1f}% | {row['wk']:>+5.1f}% | {row['score']:>5.1f} | {row['rvol']:>4.1f}x | {row['rs']:>+4.1f} | {row['vwap']:>+4.1f}% | {row['rsi']:>3.0f} | {row['status']:<4} | {row['rank']:>5.2f}"
             )
     else:
-        report += "_None_\\n"
+        lines.append('None')
 
-    report += "\\n🏅 *ETF:*\\n"
+    lines.append('')
+    lines.append('ETF:')
     if rows["ETF"]:
         for row in rows["ETF"]:
-            report += (
-                f"`{row['ticker']:<6} | "
-                f"{row['price']:>6.2f} | "
-                f"{row['day']:>+5.1f}% | "
-                f"{row['wk']:>+5.1f}% | "
-                f"{row['score']:>5.1f} | "
-                f"{row['rvol']:>4.1f}x | "
-                f"{row['rs']:>+4.1f} | "
-                f"{row['vwap']:>+4.1f}% | "
-                f"{row['rsi']:>3.0f} | "
-                f"{row['status']:<4} | "
-                f"{row['rank']:>5.2f}`\\n"
+            lines.append(
+                f"{row['ticker']:<6} | {row['price']:>6.2f} | {row['day']:>+5.1f}% | {row['wk']:>+5.1f}% | {row['score']:>5.1f} | {row['rvol']:>4.1f}x | {row['rs']:>+4.1f} | {row['vwap']:>+4.1f}% | {row['rsi']:>3.0f} | {row['status']:<4} | {row['rank']:>5.2f}"
             )
     else:
-        report += "_None_\\n"
+        lines.append('None')
 
-    return report
+    lines.append('```')
+    return "\\n".join(lines)
 
 
 def run_execution_scan_v2(service):
