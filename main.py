@@ -13,6 +13,8 @@ from googleapiclient.http import MediaIoBaseDownload
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
 BASE = f"https://api.telegram.org/bot{TOKEN}"
+TOP_N = 10
+SHOW_DEBUG = False
 
 
 def send_msg(text):
@@ -86,7 +88,7 @@ def filter_rth(df):
         return df
 
 
-def get_5m_rth(ticker, period="1d"):
+def get_5m_rth(ticker, period="5d"):
     try:
         raw = yf.download(ticker, period=period, interval="5m", progress=False, auto_adjust=False)
         return filter_rth(raw)
@@ -147,21 +149,21 @@ def build_dynamic_watchlist(service):
     for prefix in ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]:
         df, status = download_latest_file(service, prefix)
         if df is None:
-            logs.append(f"❌ {prefix}: {status}")
+            logs.append(f"{prefix}: {status}")
             continue
         clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
         df = df.rename(columns=clean)
         sel = next((c for c in df.columns if "final" in c or "selection" in c), None)
         tcol = next((c for c in df.columns if "ticker" in c), "ticker")
         if not sel or tcol not in df.columns:
-            logs.append(f"⚠️ {prefix}: Col missing")
+            logs.append(f"{prefix}: Col missing")
             continue
         mask = df[sel].astype(str).str.contains("Anchor|Turbo|Top 5", na=False, case=False)
         for _, row in df[mask].iterrows():
             tick = str(row[tcol]).strip().upper()
             if tick:
                 watchlist[tick] = str(row[sel])
-        logs.append(f"✅ {prefix}: Found {int(mask.sum())}")
+        logs.append(f"{prefix}: Found {int(mask.sum())}")
     return watchlist, "\n".join(logs)
 
 
@@ -170,38 +172,36 @@ def get_market_dashboard():
         spy_2d = yf.download("SPY", period="2d", interval="1d", progress=False)
         spy_cls = extract_col(spy_2d, "Close")
         if spy_cls is None or len(spy_cls) < 2:
-            return "⚠️ Dashboard Offline\n"
+            return "WTC Sentinel Dashboard\nStatus: Offline\n"
         s_p = float(spy_cls.iloc[-1])
         prev_c = float(spy_cls.iloc[-2])
         s_c = ((s_p / prev_c) - 1) * 100
         v_hist = yf.Ticker("^VIX").history(period="1d")
         v_p = float(v_hist["Close"].iloc[-1])
         status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
-        emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
         return (
-            f"📊 WTC Sentinel Dashboard\n"
-            f"--------------------------\n"
-            f"Status: {status} {emoji}\n"
+            "WTC Sentinel Dashboard\n"
+            f"Status: {status}\n"
             f"VIX: {v_p:.2f} | SPY: {s_p:.2f} ({s_c:+.2f}%)\n"
-            f"--------------------------\n"
         )
     except Exception:
-        return "⚠️ Dashboard Offline\n"
+        return "WTC Sentinel Dashboard\nStatus: Offline\n"
 
 
 def get_portfolio_performance(watchlist):
     if not watchlist:
-        return "⚠️ Watchlist empty\n"
-    report = "My Portfolio Watch (Dynamic)\n"
-    report += "Type | Ticker | Price | Day% | Wk% | Status\n"
-    report += "--------------------------------------------------\n"
+        return "Portfolio Watch\nWatchlist empty\n"
+    lines = []
+    lines.append("Portfolio Watch")
+    lines.append("Type   | Ticker | Price  | Day%  | Wk%   | Status")
+    lines.append("---------------------------------------------------")
     for t, label in watchlist.items():
         try:
             session_df = get_latest_rth_session(t, period="5d")
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             if session_df is None or session_df.empty or close_s is None or open_s is None or close_s.empty or open_s.empty:
-                report += f"N/D     | {t:<5} | N/A | N/A | N/A | ⚠️\n"
+                lines.append(f"N/D    | {t:<6} | N/A    | N/A   | N/A   | Weak")
                 continue
             curr_p = float(close_s.iloc[-1])
             day_open = float(open_s.iloc[0])
@@ -212,19 +212,18 @@ def get_portfolio_performance(watchlist):
             wk_open = get_week_start_open(t) or prev_p
             wk_chg = ((curr_p / wk_open) - 1) * 100
             if wk_chg >= 8 and day_chg >= 1:
-                status = "✅ Str"
+                status = "Str"
             elif wk_chg >= 3 and day_chg >= 0:
-                status = "👀 Bld"
+                status = "Bld"
             elif wk_chg >= 0 or day_chg > -2:
-                status = "⚠️ Weak"
+                status = "Weak"
             else:
-                status = "❌ Bel"
-            lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
-            report += f"{lbl:<8} | {t:<5} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}\n"
+                status = "Bel"
+            lbl = (label[:6] + ".") if len(label) > 7 else label[:7]
+            lines.append(f"{lbl:<6} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}")
         except Exception:
-            report += f"Err     | {t:<5} | N/A | N/A | N/A | ❌\n"
-    report += "--------------------------------------------------\n"
-    return report
+            lines.append(f"Err    | {t:<6} | N/A    | N/A   | N/A   | Bel")
+    return "\n".join(lines)
 
 
 def build_underdog_list(service):
@@ -249,20 +248,24 @@ def build_underdog_list(service):
     return underdogs
 
 
-def run_execution_scan(service, limit=20):
+def compute_execution_rows(service):
     underdogs = build_underdog_list(service)
-    rows = []
+    all_rows = []
     spy_session = get_latest_rth_session("SPY", period="5d")
     spy_close = extract_col(spy_session, "Close")
     spy_day_chg = ((float(spy_close.iloc[-1]) / float(spy_close.iloc[0])) - 1) * 100 if spy_close is not None and len(spy_close) > 1 else 0.0
-    for t, bucket, score in underdogs:
+
+    for t, bucket, score_str in underdogs:
         try:
-            session_df = get_latest_rth_session(t, period="5d")
+            session_df = get_latest_rth_session(t, period="20d")
+            if session_df is None or session_df.empty:
+                continue
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             volume_s = extract_col(session_df, "Volume")
-            if session_df is None or session_df.empty or close_s is None or open_s is None or close_s.empty or open_s.empty:
+            if any(x is None or getattr(x, "empty", False) for x in [close_s, open_s, volume_s]):
                 continue
+
             curr_p = float(close_s.iloc[-1])
             day_open = float(open_s.iloc[0])
             day_chg = ((curr_p / day_open) - 1) * 100
@@ -272,42 +275,77 @@ def run_execution_scan(service, limit=20):
             wk_chg = ((curr_p / wk_open) - 1) * 100
             if wk_chg <= 5:
                 continue
-            avg_vol = float(volume_s.mean()) if volume_s is not None and not volume_s.empty else 0.0
-            rvol = float(volume_s.iloc[-1] / avg_vol) if avg_vol > 0 else 0.0
+
+            avg_vol = volume_s.rolling(10).mean().iloc[-1]
+            rvol = float(volume_s.iloc[-1] / avg_vol) if pd.notna(avg_vol) and avg_vol > 0 else 1.0
             rs = day_chg - spy_day_chg
-            vwap = float((volume_s * close_s).sum() / volume_s.sum()) if volume_s is not None and volume_s.sum() > 0 else curr_p
-            vwap_pct = ((curr_p / vwap) - 1) * 100
-            if hasattr(close_s, "diff") and len(close_s) >= 15:
-                delta = close_s.diff()
-                gain = delta.clip(lower=0).rolling(window=14).mean()
-                loss = (-delta.clip(upper=0)).rolling(window=14).mean()
-                rs_i = gain / loss
-                rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
-            else:
-                rsi = 50
-            if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
-                status = "⚠️ Ext"
+            vwap_base = volume_s.rolling(5).sum()
+            vwap_num = (volume_s * close_s).rolling(5).sum()
+            vwap_last = float(vwap_num.iloc[-1] / vwap_base.iloc[-1]) if pd.notna(vwap_base.iloc[-1]) and float(vwap_base.iloc[-1]) > 0 else curr_p
+            vwap_pct = ((curr_p / vwap_last) - 1) * 100
+            delta = close_s.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs_i = gain / loss
+            rsi = float(100 - (100 / (1 + rs_i.iloc[-1]))) if not pd.isna(rs_i.iloc[-1]) else 50.0
+            score = float(score_str) if str(score_str) not in ["N/A", "nan", "None", ""] else 50.0
+
+            if wk_chg >= 15 or (rvol >= 2 and rsi < 80 and vwap_pct > 0):
+                status = "Ext"
+                status_weight = 3
             elif rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
-                status = "🚀 Brk"
+                status = "Brk"
+                status_weight = 2
             elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
-                status = "👀 Wch"
+                status = "Wch"
+                status_weight = 1
             else:
-                status = "❌ Bel"
-            rows.append((t, bucket, curr_p, day_chg, wk_chg, score, rvol, rs, vwap_pct, rsi, status))
+                status = "Bel"
+                status_weight = 0
+
+            rank = (
+                status_weight * 10
+                + score / 10
+                + wk_chg / 5
+                + (100 - rsi) / 20
+                + (2 if rvol >= 2 else 0)
+            )
+
+            all_rows.append({
+                "ticker": t,
+                "bucket": bucket,
+                "price": curr_p,
+                "day": day_chg,
+                "wk": wk_chg,
+                "score": score,
+                "rvol": rvol,
+                "rs": rs,
+                "vwap": vwap_pct,
+                "rsi": rsi,
+                "status": status,
+                "rank": round(rank, 2),
+            })
         except Exception:
             continue
-    rows.sort(key=lambda x: x[4], reverse=True)
-    rows = rows[:limit]
-    report = "Execution Scan — UnderRadar\n"
-    report += "Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status\n"
-    report += "-------------------------------------------------------------------------------------\n"
+
+    all_rows = sorted(all_rows, key=lambda x: x["rank"], reverse=True)[:TOP_N]
+    return all_rows
+
+
+def build_execution_report(service):
+    rows = compute_execution_rows(service)
+    lines = []
+    lines.append("Execution Scan — UnderRadar | TOP 10")
+    lines.append("Ticker | Type   | Price  | Day%  | Wk%   | Score | RVol | RS   | VWAP% | RSI | St | Rank")
+    lines.append("----------------------------------------------------------------------------------------------")
     if not rows:
-        report += "None\n"
-        return report
-    for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st in rows:
-        score_txt = sc if isinstance(sc, str) else f"{float(sc):.0f}"
-        report += f"{t:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {score_txt:<5} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+4.1f}% | {rsi:>3.0f} | {st}\n"
-    return report
+        lines.append("None")
+        return "\n".join(lines)
+    for row in rows:
+        lines.append(
+            "{ticker:<6} | {bucket:<6} | {price:>6.2f} | {day:>+5.1f}% | {wk:>+5.1f}% | {score:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {status:<3} | {rank:>5.2f}".format(**row)
+        )
+    return "\n".join(lines)
 
 
 def debug_execution_scan(service):
@@ -355,13 +393,15 @@ def debug_execution_scan(service):
 def main():
     service = get_drive_service()
     watchlist, drive_logs = build_dynamic_watchlist(service)
-    dashboard = get_market_dashboard() + "\nDiagnostics:\n" + drive_logs + "\n"
+    dashboard = get_market_dashboard()
     portfolio = get_portfolio_performance(watchlist)
-    execution_scan = run_execution_scan(service, limit=20)
-    debug_scan = debug_execution_scan(service)
-    send_msg(dashboard + "\n" + portfolio)
+    execution_scan = build_execution_report(service)
+
+    msg1 = dashboard + "\nDiagnostics:\n" + drive_logs + "\n\n" + portfolio
+    send_msg(msg1)
     send_msg(execution_scan)
-    send_msg(debug_scan)
+    if SHOW_DEBUG:
+        send_msg(debug_execution_scan(service))
 
 
 if __name__ == "__main__":
