@@ -214,35 +214,55 @@ def get_market_dashboard():
     try:
         spy_2d = yf.download("SPY", period="2d", interval="1d", progress=False)
         spy_cls = extract_col(spy_2d, "Close")
+        if spy_cls is None or len(spy_cls) < 2:
+            return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
+
         s_p = float(spy_cls.iloc[-1])
         prev_c = float(spy_cls.iloc[-2])
         s_c = ((s_p / prev_c) - 1) * 100
-        v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
+
+        vix_hist = yf.Ticker("^VIX").history(period="1d")
+        if vix_hist is None or vix_hist.empty or "Close" not in vix_hist:
+            return (
+                "📊 WTC Sentinel Dashboard\n"
+                "------------------------------\n"
+                f"📉 SPY: {s_p:.2f} ({s_c:+.2f}%)\n"
+                "⚠️ VIX: Offline\n"
+                "------------------------------\n"
+            )
+
+        v_p = float(vix_hist["Close"].iloc[-1])
         status = "BULLISH" if v_p < 18 else "CAUTION" if v_p < 25 else "BEARISH"
         emoji = "🟢" if status == "BULLISH" else "⚠️" if status == "CAUTION" else "🔴"
+
         return (
-            f"📊 *WTC Sentinel Dashboard*\n"
-            f"`--------------------------`\n"
-            f"🚦 *Status:* `{status}` {emoji}\n"
-            f"📉 *VIX:* `{v_p:.2f}` | 📈 *SPY:* `{s_p:.2f} ({s_c:+.2f}%)`\n"
-            f"`--------------------------`\n"
+            "📊 WTC Sentinel Dashboard\n"
+            "------------------------------\n"
+            f"🚦 Status: {status} {emoji}\n"
+            f"📉 VIX: {v_p:.2f} | 📈 SPY: {s_p:.2f} ({s_c:+.2f}%)\n"
+            "------------------------------\n"
         )
     except Exception:
-        return "⚠️ Dashboard Offline\n\n"
+        return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
 def get_portfolio_performance(watchlist):
     if not watchlist:
-        return "⚠️ Watchlist empty\n"
-    report = "📈 *My Portfolio Watch (Dynamic)*\n"
-    report += "`Type | Ticker | Price | Day% | Wk% | Status`\n"
-    report += "`--------------------------------------------------`\n"
+        return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
+
+    report = []
+    report.append("📈 My Portfolio Watch (Dynamic)")
+    report.append("--------------------------------------------------")
+    report.append("Type      | Ticker | Price  | Day%  | Wk%   | Status")
+    report.append("--------------------------------------------------")
+
     for t, label in watchlist.items():
         try:
             session_df = get_latest_rth_session(t, period="5d")
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
+
             if session_df is None or session_df.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
-                report += f"`{'N/D':<8} | {t:<5} | N/A | N/A | N/A | ⚠️`\n"
+                report.append(f"{'N/D':<9} | {t:<6} | {'N/A':>6} | {'N/A':>+5} | {'N/A':>+5} | ⚠️")
                 continue
 
             curr_p = float(close_s.iloc[-1])
@@ -256,6 +276,7 @@ def get_portfolio_performance(watchlist):
             wk_open = get_week_start_open(t)
             if wk_open is None:
                 wk_open = prev_p
+
             wk_chg = ((curr_p / wk_open) - 1) * 100
 
             if wk_chg >= 8 and day_chg >= 1:
@@ -267,16 +288,20 @@ def get_portfolio_performance(watchlist):
             else:
                 status = "❌ Bel"
 
-            lbl = (label[:7] + ".") if len(label) > 8 else label[:8]
-            report += (
-                f"`{lbl:<8} | {t:<5} | {curr_p:>6.2f} | "
-                f"{day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}`\n"
+            lbl = str(label).strip()
+            lbl = (lbl[:7] + ".") if len(lbl) > 8 else lbl[:8]
+
+            report.append(
+                f"{lbl:<9} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}"
             )
 
         except Exception:
-            report += f"`{'Err':<8} | {t:<5} | N/A | N/A | N/A | ❌`\n"
-    report += "`--------------------------------------------------`\n"
-    return report + "\n"
+            report.append(f"{'Err':<9} | {t:<6} | {'N/A':>6} | {'N/A':>+5} | {'N/A':>+5} | ❌")
+
+    report.append("--------------------------------------------------")
+    return "\n".join(report) + "\n"
+
+
 
 def build_underdog_list(service):
     underdogs = []
@@ -391,6 +416,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     lines = []
     lines.append(title)
+    lines.append("----------------------------------------------------------------------------------------------")
     lines.append("Ticker | Type   | Price  | Day%  | Wk%   | Score | RVol | RS   | VWAP% | RSI | St | Rank")
     lines.append("----------------------------------------------------------------------------------------------")
 
@@ -402,7 +428,9 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 f"{t:<6} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
             )
 
+    lines.append("----------------------------------------------------------------------------------------------")
     return "\n".join(lines)
+
 
 def main():
     service = get_drive_service()
