@@ -252,7 +252,7 @@ def get_portfolio_performance(watchlist):
     report = []
     report.append("📈 My Portfolio Watch (Dynamic)")
     report.append("--------------------------------------------------")
-    report.append("Type      | Ticker | Price  | Day%  | Wk%   | Status")
+    report.append("Type | Ticker | Price  | Day%  | Wk%   | Status")
     report.append("--------------------------------------------------")
 
     for t, label in watchlist.items():
@@ -424,7 +424,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     lines = []
     lines.append(title) 
-    lines.append("**************************_HOT STOCKS_************************")
+    lines.append("************************** HOT STOCKS ************************")
     lines.append("Ticker | Type | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | St | Rank")
     lines.append("**************************************************************")
 
@@ -437,7 +437,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 f"{icon} {t:<5} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
             )
 
-    lines.append("***********************_GOOD LUCK_*****************************")
+    lines.append("*********************** GOOD LUCK *****************************")
     return "\n".join(lines)
 
 
