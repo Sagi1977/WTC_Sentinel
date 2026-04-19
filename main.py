@@ -296,9 +296,11 @@ def build_underdog_list(service):
                 underdogs.append((t, bucket, score))
     return underdogs
 
+
 def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     underdogs = build_underdog_list(service)
     rows = []
+
     spy_session = get_latest_rth_session("SPY", period="5d")
     spy_close = extract_col(spy_session, "Close")
     spy_day_chg = ((float(spy_close.iloc[-1]) / float(spy_close.iloc[0])) - 1) * 100 if spy_close is not None and len(spy_close) > 1 else 0.0
@@ -309,15 +311,18 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             volume_s = extract_col(session_df, "Volume")
+
             if session_df is None or session_df.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
                 continue
 
             curr_p = float(close_s.iloc[-1])
             day_open = float(open_s.iloc[0])
             day_chg = ((curr_p / day_open) - 1) * 100
+
             wk_open = get_week_start_open(t)
             if wk_open is None:
                 continue
+
             wk_chg = ((curr_p / wk_open) - 1) * 100
             if wk_chg <= 5:
                 continue
@@ -346,6 +351,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                     status, sw = "Wch", 1
                 else:
                     status, sw = "Bel", 0
+
             elif regime == "BRK/WCH":
                 if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
                     status, sw = "Brk", 3
@@ -355,6 +361,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                     status, sw = "Ext", 1
                 else:
                     status, sw = "Bel", 0
+
             else:
                 if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
                     status, sw = "Brk", 2
@@ -365,30 +372,34 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 else:
                     status, sw = "Bel", 0
 
-            rank = sw * 10 + score / 10 + wk_chg / 5 + (100 - rsi) / 20 + (2 if rvol >= 2 else 0)
-            rows.append((t, bucket, curr_p, day_chg, wk_chg, score, rvol, rs, vwap_pct, rsi, status, rank))
+            score_val = float(score) if str(score) not in ["N/A", "nan", "None", ""] else 50.0
+            rank = sw * 10 + score_val / 10 + wk_chg / 5 + (100 - rsi) / 20 + (2 if rvol >= 2 else 0)
+
+            rows.append((t, bucket, curr_p, day_chg, wk_chg, score_val, rvol, rs, vwap_pct, rsi, status, rank))
         except Exception:
             continue
 
     rows.sort(key=lambda x: x[-1], reverse=True)
     rows = rows[:TOP_N]
+
     title = f"🎯 Execution Scan — UnderRadar | TOP {TOP_N} | Regime: {regime}"
     if market_note:
         title += f" | {market_note}"
-    report = title + "
-"
-    report += "Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status
-"
-    report += "-------------------------------------------------------------------------------------
-"
+
+    lines = []
+    lines.append(title)
+    lines.append("Ticker | Type   | Price  | Day%  | Wk%   | Score | RVol | RS   | VWAP% | RSI | St | Rank")
+    lines.append("----------------------------------------------------------------------------------------------")
+
     if not rows:
-        report += "None
-"
+        lines.append("None")
     else:
         for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st, rk in rows:
-            report += f"{t:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:<5} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+4.1f}% | {rsi:>3.0f} | {st}
-"
-    return report
+            lines.append(
+                f"{t:<6} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
+            )
+
+    return "\n".join(lines)
 
 def main():
     service = get_drive_service()
