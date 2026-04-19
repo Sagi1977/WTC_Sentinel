@@ -424,9 +424,9 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     lines = []
     lines.append(title)
-    lines.append("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+    lines.append("**************************HOT STOCKS**************************")
     lines.append("Ticker | Type   | Price  | Day%  | Wk%   | Score | RVol | RS   | VWAP% | RSI | St | Rank")
-    lines.append("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+    lines.append("**************************************************************")
 
     if not rows:
         lines.append("None")
@@ -437,7 +437,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 f"{icon} {t:<5} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
             )
 
-    lines.append("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+    lines.append("***********************GOOD LUCK*****************************")
     return "\n".join(lines)
 
 
