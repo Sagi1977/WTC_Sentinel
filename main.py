@@ -17,6 +17,8 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 BASE = f"https://api.telegram.org/bot{TOKEN}"
+TOP_N = 10
+SHOW_DEBUG = False
 
 def send_msg(text):
     if not text:
@@ -295,96 +297,97 @@ def build_underdog_list(service):
     return underdogs
 
 def run_execution_scan(service, regime="NEUTRAL", market_note=""):
-
     underdogs = build_underdog_list(service)
-    res = {"STOCKS": [], "ETF": []}
+    rows = []
+    spy_session = get_latest_rth_session("SPY", period="5d")
+    spy_close = extract_col(spy_session, "Close")
+    spy_day_chg = ((float(spy_close.iloc[-1]) / float(spy_close.iloc[0])) - 1) * 100 if spy_close is not None and len(spy_close) > 1 else 0.0
+
     for t, bucket, score in underdogs:
         try:
             session_df = get_latest_rth_session(t, period="5d")
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             volume_s = extract_col(session_df, "Volume")
-            if (session_df is None or session_df.empty or close_s is None or close_s.empty or 
-                open_s is None or open_s.empty):
+            if session_df is None or session_df.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
                 continue
 
             curr_p = float(close_s.iloc[-1])
             day_open = float(open_s.iloc[0])
             day_chg = ((curr_p / day_open) - 1) * 100
-
             wk_open = get_week_start_open(t)
             if wk_open is None:
                 continue
             wk_chg = ((curr_p / wk_open) - 1) * 100
-            if wk_chg > 5:
-                # RVol - נפח יחסי
-                avg_vol = volume_s.mean() if volume_s is not None else 1.0
-                rvol = volume_s.iloc[-1] / avg_vol if avg_vol > 0 else 0.0
+            if wk_chg <= 5:
+                continue
 
-                # RS vs SPY
-                spy_session = get_latest_rth_session("SPY", period="5d")
-                spy_close = extract_col(spy_session, "Close")
-                spy_day_chg = (spy_close.iloc[-1] / spy_close.iloc[0] - 1) * 100 if spy_close is not None and len(spy_close) > 1 else 0.0
-                rs = day_chg - spy_day_chg
+            avg_vol = volume_s.mean() if volume_s is not None else 1.0
+            rvol = volume_s.iloc[-1] / avg_vol if avg_vol and avg_vol > 0 else 0.0
+            rs = day_chg - spy_day_chg
+            vwap = (volume_s * close_s).sum() / volume_s.sum() if volume_s.sum() > 0 else curr_p
+            vwap_pct = ((curr_p / vwap) - 1) * 100
 
-                # VWAP
-                vwap = (volume_s * close_s).sum() / volume_s.sum() if volume_s.sum() > 0 else curr_p
-                vwap_pct = ((curr_p / vwap) - 1) * 100
+            if hasattr(close_s, "diff") and len(close_s) >= 15:
+                delta = close_s.diff()
+                gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs_i = gain / loss
+                rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
+            else:
+                rsi = 50
 
-                # RSI(14)
-                if hasattr(close_s, "diff") and len(close_s) >= 15:
-                    delta = close_s.diff()
-                    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                    rs_i = gain / loss
-                    rsi = 100 - (100 / (1 + rs_i.iloc[-1])) if not pd.isna(rs_i.iloc[-1]) else 50
-                else:
-                    rsi = 50
-
-                # Status for Execution Scan (signal-oriented)
+            if regime == "EXT":
                 if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
-                    status = "⚠️ Ext"
+                    status, sw = "Ext", 3
                 elif rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
-                    status = "🚀 Brk"
+                    status, sw = "Brk", 2
                 elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
-                    status = "👀 Wch"
+                    status, sw = "Wch", 1
                 else:
-                    status = "❌ Bel"
+                    status, sw = "Bel", 0
+            elif regime == "BRK/WCH":
+                if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
+                    status, sw = "Brk", 3
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
+                    status, sw = "Wch", 2
+                elif (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
+                    status, sw = "Ext", 1
+                else:
+                    status, sw = "Bel", 0
+            else:
+                if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
+                    status, sw = "Brk", 2
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
+                    status, sw = "Wch", 2
+                elif (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
+                    status, sw = "Ext", 1
+                else:
+                    status, sw = "Bel", 0
 
-                res[bucket].append((t, curr_p, day_chg, wk_chg, score, rvol, rs, vwap_pct, rsi, status))
+            rank = sw * 10 + score / 10 + wk_chg / 5 + (100 - rsi) / 20 + (2 if rvol >= 2 else 0)
+            rows.append((t, bucket, curr_p, day_chg, wk_chg, score, rvol, rs, vwap_pct, rsi, status, rank))
         except Exception:
             continue
 
-    res["STOCKS"].sort(key=lambda x: x[3], reverse=True)
-    res["ETF"].sort(key=lambda x: x[3], reverse=True)
-    total = len(res["STOCKS"]) + len(res["ETF"])
-    v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
-    report = f"🎯 *Execution Scan — UnderRadar | TOP 10 | Regime: {regime} | {market_note}*\n"
-    report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status`\n"
-    report += "`-------------------------------------------------------------------------------------`\n\n"
-
-    report += "🥇 *STOCKS:*\n"
-    if res["STOCKS"]:
-        for t, p, d, w, sc, rvol, rs, vwap, rsi, st in res["STOCKS"]:
-            report += f"`{t:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:<5} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+4.1f}% | {rsi:>3.0f} | {st}`\n"
+    rows.sort(key=lambda x: x[-1], reverse=True)
+    rows = rows[:TOP_N]
+    title = f"🎯 Execution Scan — UnderRadar | TOP {TOP_N} | Regime: {regime}"
+    if market_note:
+        title += f" | {market_note}"
+    report = title + "
+"
+    report += "Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status
+"
+    report += "-------------------------------------------------------------------------------------
+"
+    if not rows:
+        report += "None
+"
     else:
-        report += "_None_\n"
-
-    report += "\n🏅 *ETF:*\n"
-    if res["ETF"]:
-        for t, p, d, w, sc, rvol, rs, vwap, rsi, st in res["ETF"]:
-            report += f"`{t:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:<5} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+4.1f}% | {rsi:>3.0f} | {st}`\n"
-    else:
-        report += "_None_\n"
-
-    report += "\n"
-    if total == 0:
-        report += "💡 *סיכום:* אין Underdogs עם Wk% מעל +5% כרגע."
-        if v_p > 22:
-            report += " VIX גבוה — זהירות."
-    else:
-        report += f"🚀 *סיכום:* {total} הזדמנויות מתחת לרדאר עם Wk% > +5%."
-
+        for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st, rk in rows:
+            report += f"{t:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:<5} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+4.1f}% | {rsi:>3.0f} | {st}
+"
     return report
 
 def main():
