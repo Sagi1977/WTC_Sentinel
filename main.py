@@ -23,17 +23,20 @@ SHOW_DEBUG = False
 def send_msg(text):
     if not text:
         return
-    for chunk in [text[i:i+4000] for i in range(0, len(text), 4000)]:
+
+    for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
         try:
-            requests.post(
+            r = requests.post(
                 f"{BASE}/sendMessage",
                 json={"chat_id": CHAT_ID, "text": chunk},
                 timeout=10,
             )
-        except Exception:
-            pass
-        time.sleep(0.5)
+            print("TELEGRAM STATUS:", r.status_code, r.text[:200])
+        except Exception as e:
+            print("TELEGRAM ERROR:", str(e)[:200])
 
+        time.sleep(0.5)
+        
 def get_drive_service():
     creds, _ = google.auth.default()
     return build("drive", "v3", credentials=creds)
