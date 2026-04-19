@@ -326,6 +326,14 @@ def build_underdog_list(service):
 
 
 def run_execution_scan(service, regime="NEUTRAL", market_note=""):
+    def status_icon(st):
+        return {
+            "Brk": "🚀",
+            "Wch": "👀",
+            "Ext": "⚠️",
+            "Bel": "❌",
+        }.get(st, "•")
+
     underdogs = build_underdog_list(service)
     rows = []
 
@@ -416,19 +424,20 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     lines = []
     lines.append(title)
-    lines.append("----------------------------------------------------------------------------------------------")
+    lines.append("────────────────────────────────────────────────────────────────────────────────────────────")
     lines.append("Ticker | Type   | Price  | Day%  | Wk%   | Score | RVol | RS   | VWAP% | RSI | St | Rank")
-    lines.append("----------------------------------------------------------------------------------------------")
+    lines.append("────────────────────────────────────────────────────────────────────────────────────────────")
 
     if not rows:
         lines.append("None")
     else:
         for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st, rk in rows:
+            icon = status_icon(st)
             lines.append(
-                f"{t:<6} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
+                f"{icon} {t:<5} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | {sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
             )
 
-    lines.append("----------------------------------------------------------------------------------------------")
+    lines.append("────────────────────────────────────────────────────────────────────────────────────────────")
     return "\n".join(lines)
 
 
