@@ -328,7 +328,7 @@ def run_execution_scan(service):
     v_p = float(yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1])
     report = "🎯 *Execution Scan — UnderRadar*\n"
     report += "`Ticker | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | Status`\n"
-    report += "`-------------------------------------------------------------------------------------`\n\n"
+    report += "`-----------------------------------------TEST-------------------------------------------`\n\n"
 
     report += "🥇 *STOCKS:*\n"
     if res["STOCKS"]:
