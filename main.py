@@ -283,7 +283,7 @@ def get_portfolio_performance(watchlist):
                 status = "✅ Str"
             elif wk_chg >= 3 and day_chg >= 0:
                 status = "👀 Bld"
-            elif -0.25 <= wk_chg < 3 and -0.5 <= day_chg < 1.0:
+            elif 0 <= wk_chg < 1 and -0.2 <= day_chg <= 0.5:
                 status = "🟦 Hold"
             elif wk_chg >= 0 or day_chg > -2:
                 status = "⚠️ Weak"
@@ -302,6 +302,7 @@ def get_portfolio_performance(watchlist):
 
     report.append("--------------------------------------------------")
     return "\n".join(report) + "\n"
+
 
 
 def build_underdog_list(service):
