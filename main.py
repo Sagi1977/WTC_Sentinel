@@ -284,10 +284,10 @@ def get_portfolio_performance(watchlist):
                 status = "✅ Str"
             elif wk_chg >= 3 and day_chg >= 0:
                 status = "👀 Bld"
-            elif wk_chg >= 0:
+            elif -0.5 <= wk_chg < 3 and day_chg > -1.0:
                 status = "🟦 Hold"
-            elif day_chg > -2:
-                status = "🟦 Hold"
+            elif wk_chg >= 0 or day_chg > -2:
+                status = "⚠️ Weak"
             else:
                 status = "❌ Bel"
 
