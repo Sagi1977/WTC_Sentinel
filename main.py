@@ -303,6 +303,7 @@ def get_portfolio_performance(watchlist):
     report.append("--------------------------------------------------")
     return "\n".join(report) + "\n"
 
+
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
