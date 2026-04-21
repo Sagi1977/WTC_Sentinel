@@ -245,7 +245,6 @@ def get_market_dashboard():
     except Exception:
         return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
-
 def get_portfolio_performance(watchlist):
     if not watchlist:
         return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
@@ -284,7 +283,7 @@ def get_portfolio_performance(watchlist):
                 status = "✅ Str"
             elif wk_chg >= 3 and day_chg >= 0:
                 status = "👀 Bld"
-            elif -0.5 <= wk_chg < 3 and day_chg > -1.0:
+            elif -0.25 <= wk_chg < 3 and -0.5 <= day_chg < 1.0:
                 status = "🟦 Hold"
             elif wk_chg >= 0 or day_chg > -2:
                 status = "⚠️ Weak"
@@ -303,7 +302,6 @@ def get_portfolio_performance(watchlist):
 
     report.append("--------------------------------------------------")
     return "\n".join(report) + "\n"
-
 
 def build_underdog_list(service):
     underdogs = []
