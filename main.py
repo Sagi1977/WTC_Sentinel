@@ -245,14 +245,17 @@ def get_market_dashboard():
     except Exception:
         return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
-def get_portfolio_performance(watchlist):
+
+def get_portfolio_performance(watchlist, return_rows=False):
     if not watchlist:
-        return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
+        empty_report = "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
+        return (empty_report, []) if return_rows else empty_report
 
     report = []
+    rows = []
     report.append("📈 My Portfolio Watch (Dynamic)")
     report.append("--------------------------------------------------")
-    report.append("Type | Ticker | Price  | Day%  | Wk%   | Status")
+    report.append("Type | Ticker | Price | Day% | Wk% | Status")
     report.append("--------------------------------------------------")
 
     for t, label in watchlist.items():
@@ -283,7 +286,7 @@ def get_portfolio_performance(watchlist):
                 status = "✅ Str"
             elif wk_chg >= 3 and day_chg >= 0:
                 status = "👀 Bld"
-            elif wk_chg >= 0 or day_chg > -2:
+            elif wk_chg >= -1.5 or day_chg > -2:
                 status = "⚠️ Weak"
             else:
                 status = "❌ Bel"
@@ -295,12 +298,21 @@ def get_portfolio_performance(watchlist):
                 f"{lbl:<9} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}"
             )
 
+            rows.append({
+                "ticker": t,
+                "label": lbl,
+                "price": curr_p,
+                "day_chg": day_chg,
+                "wk_chg": wk_chg,
+                "status": status,
+            })
+
         except Exception:
             report.append(f"{'Err':<9} | {t:<6} | {'N/A':>6} | {'N/A':>+5} | {'N/A':>+5} | ❌")
 
     report.append("--------------------------------------------------")
-    return "\n".join(report) + "\n"
-
+    final_report = "\n".join(report) + "\n"
+    return (final_report, rows) if return_rows else final_report
 
 
 def build_underdog_list(service):
