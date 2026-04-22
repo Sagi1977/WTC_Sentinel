@@ -245,6 +245,7 @@ def get_market_dashboard():
     except Exception:
         return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
+
 def get_portfolio_performance(watchlist):
     if not watchlist:
         return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
@@ -283,7 +284,7 @@ def get_portfolio_performance(watchlist):
                 status = "✅ Str"
             elif wk_chg >= 3 and day_chg >= 0:
                 status = "👀 Bld"
-            elif 0 <= wk_chg < 1 and -0.2 <= day_chg <= 0.5:
+            elif -0.5 <= wk_chg < 3 and day_chg > -1.0:
                 status = "🟦 Hold"
             elif wk_chg >= 0 or day_chg > -2:
                 status = "⚠️ Weak"
@@ -302,7 +303,6 @@ def get_portfolio_performance(watchlist):
 
     report.append("--------------------------------------------------")
     return "\n".join(report) + "\n"
-
 
 
 def build_underdog_list(service):
@@ -325,6 +325,334 @@ def build_underdog_list(service):
             if t:
                 underdogs.append((t, bucket, score))
     return underdogs
+
+		 
+		   
+		 
+		 
+			   
+				   
+				  
+					 
+		   
+			   
+				  
+										   
+													
+						
+
+										
+													 
+											 
+											 
+		  
+				  
+
+				   
+				
+			  
+
+																	   
+			
+							  
+									  
+														 
+						   
+			 
+																  
+							  
+												  
+
+					   
+		
+						
+									
+												  
+
+										  
+		
+								   
+																	 
+				   
+									
+					 
+									  
+						 
+																							  
+				  
+																			   
+						  
+										  
+
+							  
+												 
+				   
+		
+									  
+					   
+												 
+												
+								   
+						   
+								 
+												
+										
+							   
+										  
+								   
+											
+						 
+									  
+					   
+							 
+											
+									
+						   
+									  
+							   
+										
+					 
+					 
+				   
+
+				   
+							  
+				 
+		
+					  
+																							   
+															  
+														 
+					   
+					 
+				 
+
+									
+		
+																								  
+							  
+					 
+				   
+
+												
+		
+											  
+								  
+					   
+					  
+																							   
+															  
+										  
+											 
+					 
+				   
+
+														  
+												 
+				   
+									
+														 
+				   
+				  
+																						   
+								   
+																							
+				
+											
+							 
+					
+												 
+								 
+							   
+			   
+
+								
+		
+											 
+								  
+					   
+																												   
+																						
+									
+											 
+							   
+											
+					   
+																																			
+																		
+										  
+															
+														  
+					 
+				   
+
+
+						
+		
+																			   
+												
+												   
+										   
+
+										   
+											
+												  
+
+														 
+																		 
+																  
+
+									 
+										   
+																				
+																	   
+
+										 
+																					  
+
+											
+																						  
+
+																					  
+					 
+										  
+
+
+									 
+							
+															
+														  
+						  
+																						
+										 
+																						 
+																		   
+				   
+																								   
+												  
+																			 
+																
+				 
+															
+			 
+												  
+									 
+
+						   
+		
+																			   
+											  
+											   
+																											
+
+									 
+										
+										
+
+														 
+																		 
+					
+											   
+												  
+													  
+									   
+												  
+			 
+
+											   
+																				
+																							  
+
+				
+										   
+											  
+											  
+																		
+											  
+		 
+					 
+																										
+
+
+										 
+					 
+																											
+
+			   
+													  
+																	   
+																
+																	   
+
+									  
+			
+															   
+													  
+													
+
+																															
+																									   
+						
+
+											
+											
+													 
+
+																					  
+															  
+																													
+
+											
+							   
+								
+
+												   
+
+											
+								  
+											  
+								   
+													   
+									
+											 
+									  
+				 
+								  
+
+									
+															  
+
+						  
+																									   
+			 
+
+						 
+																								
+
+																	   
+								   
+
+
+								 
+				  
+																						 
+													 
+					  
+					
+																					
+									 
+																					 
+																	   
+																  
+											 
+					
+																							
+										  
+											  
+														   
+				 
+													
+					
 
 def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     def status_icon(st):
@@ -355,7 +683,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
         if status == "Ext":
             extension_penalty += max(vwap_pct - 1.0, 0.0) * 0.75
 
-        rank = (
+        return (
             sw * 10
             + score_part
             + week_part
@@ -364,7 +692,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             + rsi_balance
             - extension_penalty
         )
-        return rank
+				   
 
     underdogs = build_underdog_list(service)
     rows = []
@@ -437,17 +765,17 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             if regime == "EXT":
                 if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
                     status, sw = "Ext", 3
-                elif rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
+                elif rs > 0 and rvol >= 1.0 and rsi >= 50 and -1.0 <= vwap_pct <= 2.0:
                     status, sw = "Brk", 2
-                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 50 or vwap_pct > -1.5):
                     status, sw = "Wch", 1
                 else:
                     status, sw = "Bel", 0
 
             elif regime == "BRK/WCH":
-                if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
+                if rs > 0 and rvol >= 1.1 and rsi >= 52 and -0.5 <= vwap_pct <= 1.5:
                     status, sw = "Brk", 3
-                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 50 or vwap_pct > -1.0):
                     status, sw = "Wch", 2
                 elif (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
                     status, sw = "Ext", 1
@@ -457,7 +785,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             else:
                 if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
                     status, sw = "Brk", 2
-                elif wk_chg >= 5 and (rs > 0 or rsi >= 55 or vwap_pct > -1.0):
+                elif wk_chg >= 5 and (rs > 0 or rsi >= 50 or vwap_pct > -1.0):
                     status, sw = "Wch", 2
                 elif (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
                     status, sw = "Ext", 1
