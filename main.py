@@ -545,12 +545,15 @@ def classify_execution_status(regime, wk_chg, rvol, rs, vwap_pct, rsi):
         return "Bel", 0, "Below threshold in stressed regime"
 
     if regime == "BRK/WCH":
+        # Ext FIRST — overheated/extended, avoid chasing
+        if (wk_chg >= 15 and vwap_pct >= 3.0) or (vwap_pct >= 2.5 and (rsi >= 65 or rvol >= 2.0)):
+            return "Ext", 1, "Extended — avoid chasing"
+        # Best breakout structure
         if rs > 0 and rvol >= 1.1 and rsi >= 52 and -0.5 <= vwap_pct <= 1.5:
             return "Brk", 3, "Best breakout structure"
+        # Constructive watch
         if wk_chg >= 5 and (rs > 0 or rsi >= 50 or vwap_pct > -1.0):
             return "Wch", 2, "Constructive watch setup"
-        if (wk_chg >= 15) or (vwap_pct >= 1.5 and (rsi >= 60 or rvol >= 1.5)):
-            return "Ext", 1, "Good name but extended"
         return "Bel", 0, "Below threshold"
 
     if rs > 0 and rvol >= 1.2 and rsi >= 55 and -0.5 <= vwap_pct <= 1.5:
@@ -583,16 +586,27 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
     if wk_open <= 0:
         return None, "missing_week_open"
     wk_chg = calc_pct_change(curr_p, wk_open)
-    if wk_chg <= 5:
+    if wk_chg < 5:
         return None, "week_change_below_threshold"
 
-    avg_vol = safe_float(volume_s.mean(), 0.0)
-    last_vol = safe_float(volume_s.iloc[-1], 0.0)
-    rvol = (last_vol / avg_vol) if avg_vol > 0 else 0.0
+    hist_daily = get_cached_yf_download(ticker, period="30d", interval="1d")
+    hist_vol_s = extract_col(hist_daily, "Volume")
+    if hist_vol_s is not None and len(hist_vol_s) >= 5:
+        avg_daily_vol = safe_float(hist_vol_s.iloc[:-1].mean(), 0.0)
+    else:
+        avg_daily_vol = safe_float(volume_s.mean(), 0.0) * len(volume_s)
+    today_total_vol = safe_float(volume_s.sum(), 0.0)
+    rvol = (today_total_vol / avg_daily_vol) if avg_daily_vol > 0 else 0.0
     rs = day_chg - spy_day_chg
 
     vol_sum = safe_float(volume_s.sum(), 0.0)
-    vwap = safe_float((volume_s * close_s).sum(), curr_p) / vol_sum if vol_sum > 0 else curr_p
+    high_s   = extract_col(session_df, "High")
+    low_s    = extract_col(session_df, "Low")
+    if high_s is not None and low_s is not None and not high_s.empty and not low_s.empty:
+        typical_s = (high_s + low_s + close_s) / 3.0
+    else:
+        typical_s = close_s
+    vwap = safe_float((volume_s * typical_s).sum(), curr_p) / vol_sum if vol_sum > 0 else curr_p
     vwap_pct = calc_pct_change(curr_p, vwap) if vwap > 0 else 0.0
     rsi = calc_intraday_rsi(close_s)
 
