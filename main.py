@@ -508,8 +508,19 @@ def build_underdog_list(service):
             for _, row in df[mask].iterrows():
                 t = str(row[tcol]).strip().upper()
                 score = row.get(scol, np.nan) if scol else np.nan
-                if t:
-                    underdogs.append((t, bucket, score))
+                if not t:
+                    continue
+
+                # ✅ Tier_Score — משקל מ-V7
+                tier_score = safe_float(row.get("Tier_Score", np.nan), 50.0)
+
+                # ✅ Short_Warning — סינון HIGH_SHORT
+                short_warn = str(row.get("Short_Warning", "")).upper()
+                if "HIGH_SHORT" in short_warn:
+                    log_event("INFO", "build_underdog_list", "filtered HIGH_SHORT", ticker=t, warning=short_warn)
+                    continue
+
+                underdogs.append((t, bucket, score, tier_score))
         except Exception as e:
             log_event("ERROR", "build_underdog_list", "underdog build failed", prefix=prefix, error=str(e)[:160])
     return underdogs
@@ -522,16 +533,18 @@ def status_icon(st):
     return {"Brk": "🚀", "Wch": "👀", "Ext": "⚠️", "Bel": "❌"}.get(st, "•")
 
 
-def calc_rank(sw, score_val, wk_chg, rvol, rs, vwap_pct, rsi, status):
-    score_part = safe_float(score_val, 0.0) / 12.0
-    week_part = max(min(wk_chg, 25.0), 0.0) / 6.0
-    rs_part = max(rs, 0.0) * 1.5
-    rvol_part = min(max(rvol, 0.0), 3.0)
-    rsi_balance = max(0.0, 60.0 - abs(rsi - 60.0)) / 20.0
+def calc_rank(sw, score_val, wk_chg, rvol, rs, vwap_pct, rsi, status, tier_score=50.0):
+    score_part      = safe_float(score_val, 0.0) / 12.0
+    week_part       = max(min(wk_chg, 25.0), 0.0) / 6.0
+    rs_part         = max(rs, 0.0) * 1.5
+    rvol_part       = min(max(rvol, 0.0), 3.0)
+    rsi_balance     = max(0.0, 60.0 - abs(rsi - 60.0)) / 20.0
     extension_penalty = max(vwap_pct - 2.0, 0.0) * 1.5
     if status == "Ext":
         extension_penalty += max(vwap_pct - 1.0, 0.0) * 0.75
-    return sw * 10 + score_part + week_part + rs_part + rvol_part + rsi_balance - extension_penalty
+    # ✅ Tier_Score מ-V7 — משקל 15% מהציון הכולל
+    tier_part = safe_float(tier_score, 50.0) / 100.0 * 1.5
+    return sw * 10 + score_part + week_part + rs_part + rvol_part + rsi_balance + tier_part - extension_penalty
 
 
 def classify_execution_status(regime, wk_chg, rvol, rs, vwap_pct, rsi):
@@ -630,7 +643,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     spy_close = extract_col(spy_session, "Close")
     spy_day_chg = calc_pct_change(float(spy_close.iloc[-1]), float(spy_close.iloc[0])) if spy_close is not None and len(spy_close) > 1 else 0.0
 
-    for t, bucket, score in underdogs:
+    for t, bucket, score, tier_score in underdogs:
         try:
             metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg)
             if metrics is None:
@@ -646,7 +659,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 metrics["rsi"],
             )
             score_val = safe_float(score, 0.0)
-            rank = calc_rank(sw, score_val, metrics["wk_chg"], metrics["rvol"], metrics["rs"], metrics["vwap_pct"], metrics["rsi"], status)
+            rank = calc_rank(sw, score_val, metrics["wk_chg"], metrics["rvol"], metrics["rs"], metrics["vwap_pct"], metrics["rsi"], status, tier_score=tier_score)
             rows.append((
                 t, bucket, metrics["curr_p"], metrics["day_chg"], metrics["wk_chg"],
                 score_val, metrics["rvol"], metrics["rs"], metrics["vwap_pct"], metrics["rsi"],
