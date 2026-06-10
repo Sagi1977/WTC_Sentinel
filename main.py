@@ -314,9 +314,12 @@ def safe_float(x, default=0.0):
 
 
 def calc_pct_change(current, base):
-    current = safe_float(current, 0.0)
-    base = safe_float(base, 0.0)
-    if base <= 0:
+    # שימוש ב-pd.isna לזיהוי NaN לפני המרה
+    if pd.isna(current) or pd.isna(base):
+        return 0.0
+    current = safe_float(current, float('nan'))
+    base = safe_float(base, float('nan'))
+    if pd.isna(current) or pd.isna(base) or base <= 0:
         return 0.0
     return ((current / base) - 1) * 100
 
@@ -344,6 +347,8 @@ def get_market_regime():
     try:
         spy_5d = get_cached_yf_download("SPY", period="5d", interval="1d")
         spy_close = extract_col(spy_5d, "Close")
+        if spy_close is not None:
+            spy_close = spy_close.dropna()  # ניקוי NaN
         if spy_close is None or len(spy_close) < 2:
             return "NEUTRAL", "SPY offline"
 
@@ -374,6 +379,8 @@ def get_market_dashboard():
     try:
         spy_2d = get_cached_yf_download("SPY", period="2d", interval="1d")
         spy_cls = extract_col(spy_2d, "Close")
+        if spy_cls is not None:
+            spy_cls = spy_cls.dropna()  # ניקוי NaN לפני iloc
         if spy_cls is None or len(spy_cls) < 2:
             return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
@@ -470,11 +477,14 @@ def get_portfolio_performance(watchlist):
 
             curr_p = float(close_s.iloc[-1])
             day_open = float(open_s.iloc[0])
-            day_chg = calc_pct_change(curr_p, day_open)
 
+            # Day% נכון: שינוי מסגירת אתמול (כמו ברוקרים), לא מפתיחת היום
             prev_close_df = get_cached_yf_download(t, period="2d", interval="1d")
             prev_close_s = extract_col(prev_close_df, "Close")
-            prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else curr_p
+            if prev_close_s is not None:
+                prev_close_s = prev_close_s.dropna()
+            prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open
+            day_chg = calc_pct_change(curr_p, prev_p)   # מסגירת אתמול ✅
 
             wk_open = get_week_start_open(t)
             if wk_open is None:
@@ -593,7 +603,14 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
     day_open = safe_float(open_s.iloc[0], curr_p)
     if day_open <= 0:
         return None, "invalid_day_open"
-    day_chg = calc_pct_change(curr_p, day_open)
+
+    # Day% נכון: מסגירת אתמול (כמו ברוקרים), לא מפתיחת היום
+    prev_close_df = get_cached_yf_download(ticker, period="2d", interval="1d")
+    prev_close_s = extract_col(prev_close_df, "Close")
+    if prev_close_s is not None:
+        prev_close_s = prev_close_s.dropna()
+    prev_p = safe_float(prev_close_s.iloc[-2], day_open) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open
+    day_chg = calc_pct_change(curr_p, prev_p)   # מסגירת אתמול ✅
 
     wk_open = safe_float(get_week_start_open(ticker), 0.0)
     if wk_open <= 0:
@@ -641,6 +658,8 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     spy_session = get_latest_rth_session("SPY", period="5d")
     spy_close = extract_col(spy_session, "Close")
+    if spy_close is not None:
+        spy_close = spy_close.dropna()  # ניקוי NaN לפני חישוב
     spy_day_chg = calc_pct_change(float(spy_close.iloc[-1]), float(spy_close.iloc[0])) if spy_close is not None and len(spy_close) > 1 else 0.0
 
     for t, bucket, score, tier_score in underdogs:
