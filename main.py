@@ -544,75 +544,6 @@ def status_icon(st):
     return {"Brk": "🚀", "Wch": "👀", "Ext": "⚠️", "Bel": "❌"}.get(st, "•")
 
 
-def confidence_signal(rs, rvol, vwap_pct, rsi, wk_chg, above_ma200, dist_ma200, dist_52w_high):
-    """
-    Confidence Score מבוסס-מחקר — מבחין בין המשך מומנטום להיפוך.
-    מבוסס על: Jegadeesh-Titman (momentum), Jegadeesh-Lehmann (short-term reversal),
-    FasterCapital (MA200), Marquette study (52-week high).
-    מחזיר: (signal, score, reasons)
-    """
-    score = 0
-    reasons = []
-
-    # 1. RS vs SPY — momentum strength (Jegadeesh-Titman)
-    if rs > 10:
-        score += 2; reasons.append("RS+++")
-    elif rs >= 3:
-        score += 1; reasons.append("RS+")
-    elif rs < 0:
-        score -= 2; reasons.append("RS-")
-
-    # 2. RVol — liquidity-driven move = אמיתי
-    if rvol > 1.5:
-        score += 2; reasons.append("Vol++")
-    elif rvol < 1.0:
-        score -= 2; reasons.append("Vol-")
-
-    # 3. VWAP% — מתוח מדי = reversal צפוי
-    if 0 <= vwap_pct <= 3:
-        score += 1; reasons.append("VWAP-ok")
-    elif vwap_pct > 5:
-        score -= 2; reasons.append("VWAP-stretched")
-
-    # 4. MA200 — מגמה שלמה (FasterCapital)
-    if above_ma200:
-        score += 2; reasons.append("MA200+")
-    else:
-        score -= 2; reasons.append("MA200-")
-
-    # 5. 52-week high — קרוב לשיא = momentum (Marquette)
-    if dist_52w_high >= -5:        # תוך 5% מהשיא
-        score += 2; reasons.append("near52wH")
-    elif dist_52w_high < -20:      # רחוק מהשיא = גאפ זמני
-        score -= 1; reasons.append("far52wH")
-
-    # 6. RSI — מומנטום בריא vs קיצוני
-    if 50 <= rsi <= 80:
-        score += 1; reasons.append("RSI-ok")
-    elif rsi > 85:
-        score -= 1; reasons.append("RSI-extreme")
-
-    # 7. wk_chg — short-term reversal warning (Jegadeesh-Lehmann)
-    if wk_chg > 15:
-        score -= 1; reasons.append("wk-sharp")
-
-    # 8. עלייה חדה ללא נפח תומך = מתיחה, לא momentum אמיתי
-    if wk_chg > 15 and rvol < 1.5:
-        score -= 2; reasons.append("unbacked-move")
-
-    # קביעת signal לפי ציון
-    if score >= 5:
-        signal = "🟢 BUY"
-    elif score >= 2:
-        signal = "🟡 WEAK"
-    elif score >= -1:
-        signal = "⏳ WAIT"
-    else:
-        signal = "⚪ AVOID"
-
-    return signal, score, reasons
-
-
 def calc_rank(sw, score_val, wk_chg, rvol, rs, vwap_pct, rsi, status, tier_score=50.0):
     score_part      = safe_float(score_val, 0.0) / 12.0
     week_part       = max(min(wk_chg, 25.0), 0.0) / 6.0
@@ -689,38 +620,15 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
     if wk_chg < 5:
         return None, "week_change_below_threshold"
 
-    # משיכת שנה שלמה — לחישוב RVol + MA200 + 52week high (משיכה אחת)
-    hist_daily = get_cached_yf_download(ticker, period="1y", interval="1d")
+    hist_daily = get_cached_yf_download(ticker, period="30d", interval="1d")
     hist_vol_s = extract_col(hist_daily, "Volume")
-    hist_close_s = extract_col(hist_daily, "Close")
-    if hist_close_s is not None:
-        hist_close_s = hist_close_s.dropna()
-
     if hist_vol_s is not None and len(hist_vol_s) >= 5:
-        avg_daily_vol = safe_float(hist_vol_s.iloc[-20:-1].mean(), 0.0)  # 20 ימים אחרונים
+        avg_daily_vol = safe_float(hist_vol_s.iloc[:-1].mean(), 0.0)
     else:
         avg_daily_vol = safe_float(volume_s.mean(), 0.0) * len(volume_s)
     today_total_vol = safe_float(volume_s.sum(), 0.0)
     rvol = (today_total_vol / avg_daily_vol) if avg_daily_vol > 0 else 0.0
     rs = day_chg - spy_day_chg
-
-    # ✅ MA200 — מגמה ארוכת טווח (מהמחקר)
-    if hist_close_s is not None and len(hist_close_s) >= 200:
-        ma200 = safe_float(hist_close_s.iloc[-200:].mean(), 0.0)
-        above_ma200 = curr_p > ma200 if ma200 > 0 else False
-        dist_ma200 = calc_pct_change(curr_p, ma200) if ma200 > 0 else 0.0
-    else:
-        # אם אין 200 ימים — נשתמש בכל מה שיש
-        ma200 = safe_float(hist_close_s.mean(), 0.0) if hist_close_s is not None and len(hist_close_s) > 0 else 0.0
-        above_ma200 = curr_p > ma200 if ma200 > 0 else True
-        dist_ma200 = calc_pct_change(curr_p, ma200) if ma200 > 0 else 0.0
-
-    # ✅ 52-week high — מרחק משיא שנתי (מהמחקר)
-    if hist_close_s is not None and len(hist_close_s) > 0:
-        high_52w = safe_float(hist_close_s.max(), curr_p)
-        dist_52w_high = calc_pct_change(curr_p, high_52w) if high_52w > 0 else 0.0
-    else:
-        dist_52w_high = 0.0
 
     vol_sum = safe_float(volume_s.sum(), 0.0)
     high_s   = extract_col(session_df, "High")
@@ -741,9 +649,6 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
         "rs": rs,
         "vwap_pct": vwap_pct,
         "rsi": rsi,
-        "above_ma200": above_ma200,
-        "dist_ma200": dist_ma200,
-        "dist_52w_high": dist_52w_high,
     }, drop_reason
 
 
@@ -775,18 +680,10 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             )
             score_val = safe_float(score, 0.0)
             rank = calc_rank(sw, score_val, metrics["wk_chg"], metrics["rvol"], metrics["rs"], metrics["vwap_pct"], metrics["rsi"], status, tier_score=tier_score)
-
-            # ✅ Confidence Signal מבוסס-מחקר
-            signal, sig_score, sig_reasons = confidence_signal(
-                metrics["rs"], metrics["rvol"], metrics["vwap_pct"], metrics["rsi"],
-                metrics["wk_chg"], metrics["above_ma200"], metrics["dist_ma200"],
-                metrics["dist_52w_high"]
-            )
-
             rows.append((
                 t, bucket, metrics["curr_p"], metrics["day_chg"], metrics["wk_chg"],
                 score_val, metrics["rvol"], metrics["rs"], metrics["vwap_pct"], metrics["rsi"],
-                status, rank, signal, sig_score
+                status, rank
             ))
         except Exception as e:
             drop_counts["execution_exception"] = drop_counts.get("execution_exception", 0) + 1
@@ -802,18 +699,18 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     lines = [
         title,
         "************************** HOT STOCKS ************************",
-        "Ticker | Type | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | St | Rank | SIGNAL",
+        "Ticker | Type | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | St | Rank",
         "**************************************************************",
     ]
 
     if not rows:
         lines.append("None")
     else:
-        for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st, rk, signal, sig_score in rows:
+        for t, bucket, p, d, w, sc, rvol, rs, vwap, rsi, st, rk in rows:
             icon = status_icon(st)
             lines.append(
                 f"{icon} {t:<5} | {bucket:<6} | {p:>6.2f} | {d:>+5.1f}% | {w:>+5.1f}% | "
-                f"{sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f} | {signal}"
+                f"{sc:>5.1f} | {rvol:>4.1f}x | {rs:>+4.1f} | {vwap:>+5.1f}% | {rsi:>3.0f} | {st:<3} | {rk:>5.2f}"
             )
 
     if drop_counts:
