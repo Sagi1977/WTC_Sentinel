@@ -479,10 +479,11 @@ def get_portfolio_performance(watchlist):
             day_open = float(open_s.iloc[0])
 
             # Day% נכון: שינוי מסגירת אתמול (כמו ברוקרים), לא מפתיחת היום
-            prev_close_df = get_cached_yf_download(t, period="2d", interval="1d")
+            prev_close_df = get_cached_yf_download(t, period="5d", interval="1d")
             prev_close_s = extract_col(prev_close_df, "Close")
             if prev_close_s is not None:
                 prev_close_s = prev_close_s.dropna()
+            # ה-iloc[-1] הוא היום הנוכחי, iloc[-2] הוא סגירת אתמול האמיתית
             prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open
             day_chg = calc_pct_change(curr_p, prev_p)   # מסגירת אתמול ✅
 
@@ -605,7 +606,7 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
         return None, "invalid_day_open"
 
     # Day% נכון: מסגירת אתמול (כמו ברוקרים), לא מפתיחת היום
-    prev_close_df = get_cached_yf_download(ticker, period="2d", interval="1d")
+    prev_close_df = get_cached_yf_download(ticker, period="5d", interval="1d")
     prev_close_s = extract_col(prev_close_df, "Close")
     if prev_close_s is not None:
         prev_close_s = prev_close_s.dropna()
