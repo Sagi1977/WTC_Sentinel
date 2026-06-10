@@ -377,7 +377,7 @@ def get_market_regime():
 
 def get_market_dashboard():
     try:
-        spy_2d = get_cached_yf_download("SPY", period="2d", interval="1d")
+        spy_2d = get_cached_yf_download("SPY", period="5d", interval="1d")
         spy_cls = extract_col(spy_2d, "Close")
         if spy_cls is not None:
             spy_cls = spy_cls.dropna()  # ניקוי NaN לפני iloc
@@ -388,7 +388,7 @@ def get_market_dashboard():
         prev_c = float(spy_cls.iloc[-2])
         s_c = calc_pct_change(s_p, prev_c)
 
-        vix_hist = get_cached_yf_history("^VIX", period="1d")
+        vix_hist = get_cached_yf_history("^VIX", period="5d")
         if vix_hist is None or vix_hist.empty or "Close" not in vix_hist:
             return (
                 "📊 WTC Sentinel Dashboard\n"
@@ -724,6 +724,8 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 # =========================================================
 def main():
     validate_environment()
+    # איפוס cache בכל ריצה — מבטיח נתונים טריים מ-yfinance
+    DATA_CACHE.clear()
     service = get_drive_service()
 
     watchlist, drive_logs = build_dynamic_watchlist(service)
