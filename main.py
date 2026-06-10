@@ -19,7 +19,7 @@ CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
 BASE = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else ""
 TOP_N = 10
 SHOW_DEBUG = str(os.environ.get("SHOW_DEBUG", "false")).lower() == "true"
-DRIVE_PREFIXES = ["Golden_Plan_STOCKS", "Golden_Plan_ETF"]
+DRIVE_PREFIXES = ["Golden_Plan_STOCKS"]  # ETF הוסר — מיקוד במניות בלבד
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
 RTH_START = (9, 30)
@@ -497,7 +497,7 @@ def get_portfolio_performance(watchlist):
 
 def build_underdog_list(service):
     underdogs = []
-    for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS"), ("Golden_Plan_ETF", "ETF")]:
+    for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS")]:  # ETF הוסר
         df, status = download_latest_file(service, prefix)
         if df is None:
             log_event("WARN", "build_underdog_list", "missing output", prefix=prefix, status=status)
