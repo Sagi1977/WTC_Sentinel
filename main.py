@@ -146,7 +146,7 @@ def download_latest_file(service, prefix):
         ).execute()
         files = res.get("files", [])
         if not files:
-            return None, "❓ Missing"
+            return None, "❓ Missing", None
 
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]["id"]))
@@ -157,10 +157,10 @@ def download_latest_file(service, prefix):
         df = pd.read_csv(fh, encoding="utf-8-sig", engine="python")
         df = normalize_columns(df)
         validate_output_schema(df, prefix)
-        return df, f"Loaded: {files[0]['name']}"
+        return df, f"Loaded: {files[0]['name']}", files[0]['name']
     except Exception as e:
         log_event("ERROR", "download_latest_file", "failed to load output", prefix=prefix, error=str(e)[:250])
-        return None, f"Err: {str(e)[:60]}"
+        return None, f"Err: {str(e)[:60]}", None
 
 
 # =========================================================
@@ -419,11 +419,14 @@ def get_market_dashboard():
 # =========================================================
 def build_dynamic_watchlist(service):
     watchlist, logs = {}, []
+    golden_file_dt = None
     for prefix in DRIVE_PREFIXES:
-        df, status = download_latest_file(service, prefix)
+        df, status, fname = download_latest_file(service, prefix)
         if df is None:
             logs.append(f"❌ {prefix}: {status}")
             continue
+        if fname and golden_file_dt is None:
+            golden_file_dt = parse_golden_file_dt(fname)
         try:
             tcol, sel, scol = validate_output_schema(df, prefix)
             mask = df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
@@ -435,12 +438,65 @@ def build_dynamic_watchlist(service):
                     "label": str(row[sel]),
                     "score": row.get(scol, np.nan) if scol else np.nan,
                     "source": prefix,
+                    "invest": safe_float(row.get("Invest_USD", np.nan), 0.0),
                 }
             logs.append(f"✅ {prefix}: Found {int(mask.sum())}")
         except Exception as e:
             logs.append(f"⚠️ {prefix}: {str(e)[:60]}")
             log_event("ERROR", "build_dynamic_watchlist", "watchlist build failed", prefix=prefix, error=str(e)[:160])
-    return watchlist, "\n".join(logs)
+    return watchlist, "\n".join(logs), golden_file_dt
+
+
+# =========================================================
+# ✅ ENTRY BASELINE — יישור קו: כניסה לפי timestamp של קובץ Golden
+# הכלל: תאריך כניסה = יום המסחר הראשון שנפתח אחרי יצירת הקובץ
+#        מחיר כניסה = מחיר הפתיחה (Open) של אותו יום
+# =========================================================
+import re as _re
+from datetime import datetime as _dt, timedelta as _td
+
+
+def parse_golden_file_dt(filename):
+    """מחלץ datetime משם קובץ כמו Golden_Plan_STOCKS_20260608_202004.csv"""
+    try:
+        m = _re.search(r'(\d{8})_(\d{6})', str(filename))
+        if not m:
+            return None
+        return _dt.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+    except Exception:
+        return None
+
+
+def get_entry_baseline(ticker, file_dt):
+    """
+    מחזיר (entry_date, entry_open) — נקודת הכניסה לפי יישור הקו.
+    הקובץ נוצר בשעון ישראל; ET = ישראל פחות 7 שעות.
+    אם הקובץ נוצר לפני פתיחת השוק (09:30 ET) → הכניסה באותו יום מסחר.
+    אחרת → ביום המסחר הבא. מחזיר (None, None) אם יום הכניסה טרם נסחר.
+    """
+    if file_dt is None:
+        return None, None
+    try:
+        file_et = file_dt - _td(hours=7)
+        target_date = file_et.date()
+        if file_et.hour > 9 or (file_et.hour == 9 and file_et.minute >= 30):
+            target_date = target_date + _td(days=1)
+
+        daily = get_cached_yf_download(ticker, period="1mo", interval="1d")
+        open_s = extract_col(daily, "Open")
+        if open_s is None:
+            return None, None
+        open_s = open_s.dropna()
+        if open_s.empty:
+            return None, None
+        for idx, val in open_s.items():
+            d = idx.date() if hasattr(idx, "date") else pd.to_datetime(idx).date()
+            if d >= target_date:
+                return d, safe_float(val, None)
+        return None, None  # יום הכניסה עוד לא נסחר (למשל מריצים בלילה לפני)
+    except Exception as e:
+        log_event("ERROR", "get_entry_baseline", "entry baseline failed", ticker=ticker, error=str(e)[:160])
+        return None, None
 
 
 def classify_portfolio_status(day_chg, wk_chg):
@@ -455,15 +511,33 @@ def classify_portfolio_status(day_chg, wk_chg):
     return "❌ Bel", "Below acceptable strength"
 
 
-def get_portfolio_performance(watchlist):
+def get_portfolio_performance(watchlist, golden_file_dt=None):
     if not watchlist:
         return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
 
     report = []
     report.append("📈 My Portfolio Watch (Dynamic)")
-    report.append("--------------------------------------------------")
-    report.append("Type | Ticker | Price | Day% | Wk% | Status")
-    report.append("--------------------------------------------------")
+    if golden_file_dt is not None:
+        report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
+    report.append("-" * 64)
+    report.append("Type | Ticker | Price | Day% | Wk% | P&L% | vsQQQ | Status")
+    report.append("-" * 64)
+
+    # QQQ baseline פעם אחת — אותה נקודת כניסה לכל הפוזיציות
+    qqq_entry_date, qqq_entry_open = get_entry_baseline("QQQ", golden_file_dt)
+    qqq_curr = None
+    try:
+        qqq_session = get_latest_rth_session("QQQ", period="5d")
+        qqq_close_s = extract_col(qqq_session, "Close")
+        if qqq_close_s is not None and not qqq_close_s.empty:
+            qqq_curr = float(qqq_close_s.iloc[-1])
+    except Exception:
+        qqq_curr = None
+    qqq_ret = None
+    if qqq_entry_open and qqq_curr:
+        qqq_ret = calc_pct_change(qqq_curr, qqq_entry_open)
+
+    total_invest, total_pnl_weighted = 0.0, 0.0
 
     for t, info in watchlist.items():
         try:
@@ -471,7 +545,7 @@ def get_portfolio_performance(watchlist):
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             if session_df is None or session_df.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
-                report.append(f"{'N/D':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | ⚠️")
+                report.append(f"{'N/D':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ⚠️")
                 log_event("WARN", "get_portfolio_performance", "missing intraday data", ticker=t)
                 continue
 
@@ -492,24 +566,47 @@ def get_portfolio_performance(watchlist):
                 wk_open = prev_p
             wk_chg = calc_pct_change(curr_p, wk_open)
 
+            # ✅ P&L מאז הכניסה (יישור קו: פתיחת היום שאחרי קובץ Golden)
+            pnl_str, vsqqq_str = "  —  ", "  —  "
+            _, entry_open = get_entry_baseline(t, golden_file_dt)
+            if entry_open and entry_open > 0:
+                pnl = calc_pct_change(curr_p, entry_open)
+                pnl_str = f"{pnl:>+5.1f}"
+                if qqq_ret is not None:
+                    vsqqq_str = f"{(pnl - qqq_ret):>+5.1f}"
+                inv = safe_float(info.get("invest", 0.0), 0.0)
+                if inv > 0:
+                    total_invest += inv
+                    total_pnl_weighted += pnl * inv
+
             status, _ = classify_portfolio_status(day_chg, wk_chg)
             lbl = str(info.get("label", "")).strip()
             lbl = (lbl[:7] + ".") if len(lbl) > 8 else lbl[:8]
             report.append(
-                f"{lbl:<9} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {status}"
+                f"{lbl:<9} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {pnl_str}% | {vsqqq_str}% | {status}"
             )
         except Exception as e:
-            report.append(f"{'Err':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | ❌")
+            report.append(f"{'Err':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ❌")
             log_event("ERROR", "get_portfolio_performance", "portfolio row failed", ticker=t, error=str(e)[:160])
 
-    report.append("--------------------------------------------------")
+    report.append("-" * 64)
+
+    # ✅ שורת Alpha — התיק מול QQQ מאותה נקודת כניסה
+    if total_invest > 0 and qqq_ret is not None:
+        port_ret = total_pnl_weighted / total_invest
+        alpha = port_ret - qqq_ret
+        icon = "✅" if alpha >= 0 else "🔻"
+        report.append(f"📊 Portfolio: {port_ret:+.1f}% | QQQ: {qqq_ret:+.1f}% | Alpha: {alpha:+.1f}% {icon}")
+    elif golden_file_dt is not None and qqq_entry_open is None:
+        report.append("📊 Alpha: — (יום הכניסה טרם נסחר)")
+
     return "\n".join(report) + "\n"
 
 
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS")]:  # ETF הוסר
-        df, status = download_latest_file(service, prefix)
+        df, status, _fname = download_latest_file(service, prefix)
         if df is None:
             log_event("WARN", "build_underdog_list", "missing output", prefix=prefix, status=status)
             continue
@@ -832,11 +929,11 @@ def main():
     DATA_CACHE.clear()
     service = get_drive_service()
 
-    watchlist, drive_logs = build_dynamic_watchlist(service)
+    watchlist, drive_logs, golden_file_dt = build_dynamic_watchlist(service)
     dashboard = get_market_dashboard()
     dashboard += f"\n🔍 Diagnostics:\n{drive_logs}\n"
 
-    portfolio = get_portfolio_performance(watchlist)
+    portfolio = get_portfolio_performance(watchlist, golden_file_dt)
     regime, market_note = get_market_regime()
     execution_scan = run_execution_scan(service, regime=regime, market_note=market_note)
 
