@@ -429,6 +429,7 @@ def build_dynamic_watchlist(service):
             golden_file_dt = parse_golden_file_dt(fname)
         try:
             tcol, sel, scol = validate_output_schema(df, prefix)
+            inv_col = next((c for c in df.columns if "invest" in str(c).lower()), None)
             mask = df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
             for _, row in df[mask].iterrows():
                 ticker = str(row[tcol]).strip().upper()
@@ -438,7 +439,7 @@ def build_dynamic_watchlist(service):
                     "label": str(row[sel]),
                     "score": row.get(scol, np.nan) if scol else np.nan,
                     "source": prefix,
-                    "invest": safe_float(row.get("Invest_USD", np.nan), 0.0),
+                    "invest": safe_float(row.get(inv_col, np.nan), 0.0) if inv_col else 0.0,
                 }
             logs.append(f"✅ {prefix}: Found {int(mask.sum())}")
         except Exception as e:
@@ -575,9 +576,10 @@ def get_portfolio_performance(watchlist, golden_file_dt=None):
                 if qqq_ret is not None:
                     vsqqq_str = f"{(pnl - qqq_ret):>+5.1f}"
                 inv = safe_float(info.get("invest", 0.0), 0.0)
-                if inv > 0:
-                    total_invest += inv
-                    total_pnl_weighted += pnl * inv
+                if inv <= 0:
+                    inv = 1.0  # fallback: שקלול שווה אם אין Invest_USD
+                total_invest += inv
+                total_pnl_weighted += pnl * inv
 
             status, _ = classify_portfolio_status(day_chg, wk_chg)
             lbl = str(info.get("label", "")).strip()
