@@ -56,11 +56,3 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
 
-      # --- התוספת החדשה לאופציה 3 מתחילה כאן ---
-      - name: Upload Sentinel Logs as Artifact
-        uses: actions/upload-artifact@v4
-        if: always() # מבטיח שהקובץ יעלה גם אם הסקריפט נכשל באמצע
-        with:
-          name: sentinel-execution-logs
-          path: '*.txt' # תופס את כל קובצי הטקסט שנוצרו באותה תיקייה
-          retention-days: 28 # שומר את הקובץ ל-14 ימים (אפשר לשנות)
