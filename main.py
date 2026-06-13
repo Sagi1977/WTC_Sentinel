@@ -503,25 +503,43 @@ def get_entry_baseline(ticker, file_dt):
 
 def log_to_drive(service, message):
     """
-    שומר כל הודעת טלגרם בקובץ טקסט מקומי על השרת במקום בדרייב.
-    (שם הפונקציה נשאר log_to_drive כדי לא לשבור קריאות אחרות בקוד)
-    קובץ אחד ליום: WTC_Telegram_YYYYMMDD.txt
-    כל הודעה מתווספת עם timestamp.
+    שומר כל הודעת טלגרם על ידי עדכון קובץ Google Doc קיים ב-Drive.
+    משתמש ב-File ID ספציפי כדי לעקוף את בעיית יצירת הקבצים של חשבונות שירות.
     """
+    if service is None:
+        return
     try:
         from datetime import datetime as _dt2
+        import io
+        from googleapiclient.http import MediaIoBaseUpload
+
         now      = _dt2.now()
-        today    = now.strftime("%Y%m%d")
-        filename = f"WTC_Telegram_{today}.txt"
         ts       = now.strftime("%Y-%m-%d %H:%M:%S")
         entry    = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
-        # כתיבה לקובץ מקומי (מצב 'a' - Append, כדי להוסיף לסוף הקובץ ולא לדרוס)
-        with open(filename, "a", encoding="utf-8") as f:
-            f.write(entry)
+        # ה-ID המדויק של הקובץ שיצרת
+        FILE_ID = '1vhM26xZOmnQqxNsQQnGuCa2XeorHv3N829O6qCpa_hM' 
 
+        # משיכת התוכן הקיים מהקובץ
+        res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
+        existing_content = res.decode('utf-8', errors='replace')
+        
+        # חיבור התוכן החדש לישן
+        new_content = existing_content + entry
+
+        # עדכון הקובץ ב-Drive
+        media = MediaIoBaseUpload(
+            io.BytesIO(new_content.encode('utf-8')), 
+            mimetype='text/plain'
+        )
+        service.files().update(
+            fileId=FILE_ID, 
+            media_body=media
+        ).execute()
+
+        log_event("INFO", "log_to_drive", "Successfully updated Drive log file.")
     except Exception as e:
-        log_event("ERROR", "log_to_local_file", "local log failed", error=str(e)[:120])
+        log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
 def classify_portfolio_status(day_chg, wk_chg):
     if wk_chg >= 8 and day_chg >= 1:
