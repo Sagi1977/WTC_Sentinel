@@ -503,13 +503,11 @@ def get_entry_baseline(ticker, file_dt):
 
 def log_to_drive(service, message):
     """
-    שומר כל הודעת טלגרם בתיקיית TELEGRAM WEB ב-Drive.
+    שומר כל הודעת טלגרם בקובץ טקסט מקומי על השרת במקום בדרייב.
+    (שם הפונקציה נשאר log_to_drive כדי לא לשבור קריאות אחרות בקוד)
     קובץ אחד ליום: WTC_Telegram_YYYYMMDD.txt
     כל הודעה מתווספת עם timestamp.
     """
-    if service is None:
-        print("[LOG_DRIVE] service=None, skip")
-        return
     try:
         from datetime import datetime as _dt2
         now      = _dt2.now()
@@ -518,45 +516,12 @@ def log_to_drive(service, message):
         ts       = now.strftime("%Y-%m-%d %H:%M:%S")
         entry    = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
-        print(f"[LOG_DRIVE] Saving to folder {TELEGRAM_LOG_FOLDER_ID}, file {filename}")
+        # כתיבה לקובץ מקומי (מצב 'a' - Append, כדי להוסיף לסוף הקובץ ולא לדרוס)
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(entry)
 
-        # חיפוש קובץ היום בתיקייה
-        res = service.files().list(
-            q=f"name='{filename}' and '{TELEGRAM_LOG_FOLDER_ID}' in parents and trashed=false",
-            fields="files(id,name)",
-            pageSize=5
-        ).execute()
-        files = res.get('files', [])
-        print(f"[LOG_DRIVE] Found {len(files)} existing files")
-
-        if files:
-            # קובץ קיים — משיכה ועדכון
-            fh = io.BytesIO()
-            dl = MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]['id']))
-            done = False
-            while not done:
-                _, done = dl.next_chunk()
-            existing = fh.getvalue().decode('utf-8', errors='replace')
-            new_content = existing + entry
-            media = MediaIoBaseUpload(
-                io.BytesIO(new_content.encode('utf-8')), mimetype='text/plain'
-            )
-            service.files().update(fileId=files[0]['id'], media_body=media).execute()
-            print(f"[LOG_DRIVE] ✅ Updated existing file {files[0]['id']}")
-        else:
-            # קובץ חדש
-            media = MediaIoBaseUpload(
-                io.BytesIO(entry.encode('utf-8')), mimetype='text/plain'
-            )
-            result = service.files().create(
-                body={'name': filename, 'parents': [TELEGRAM_LOG_FOLDER_ID]},
-                media_body=media
-            ).execute()
-            print(f"[LOG_DRIVE] ✅ Created new file {result.get('id')}")
     except Exception as e:
-        print(f"[LOG_DRIVE] ❌ ERROR: {e}")
-        log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
-
+        log_event("ERROR", "log_to_local_file", "local log failed", error=str(e)[:120])
 
 def classify_portfolio_status(day_chg, wk_chg):
     if wk_chg >= 8 and day_chg >= 1:
