@@ -63,4 +63,4 @@ jobs:
         with:
           name: sentinel-execution-logs
           path: '*.txt' # תופס את כל קובצי הטקסט שנוצרו באותה תיקייה
-          retention-days: 14 # שומר את הקובץ ל-14 ימים (אפשר לשנות)
+          retention-days: 28 # שומר את הקובץ ל-14 ימים (אפשר לשנות)
