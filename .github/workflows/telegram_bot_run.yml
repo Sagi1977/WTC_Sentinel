@@ -1,43 +1,16 @@
-name: WTC Telegram Bot (On-Demand)
+name: WTC Telegram Bot (DISABLED)
+# ─────────────────────────────────────────────────────────────────
+# קובץ זה הוחלף על ידי sentinel_run.yml
+# sentinel_run.yml מכסה את כל לוח הזמנים הדרוש
+# אין צורך להפעיל workflow זה — השאר אותו מבוטל
+# ─────────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    - cron: '0 13 * * 0-5'
-    - cron: '0 14 * * 0-5'
-    - cron: '0 15 * * 0-5'
-    - cron: '0 16 * * 0-5'
-    - cron: '0 17 * * 0-5'
-    - cron: '0 20 * * 0-5'
-  workflow_dispatch:
+  workflow_dispatch:  # ידני בלבד — אין schedule
 
 jobs:
-  telegram-bot:
+  disabled:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Dependencies
-        run: pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai pytz
-
-      - name: Run Bot
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
-        run: python main.py
+      - name: Info
+        run: echo "This workflow is disabled. Use sentinel_run.yml instead."
