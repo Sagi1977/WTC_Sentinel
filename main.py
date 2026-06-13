@@ -508,6 +508,7 @@ def log_to_drive(service, message):
     כל הודעה מתווספת עם timestamp.
     """
     if service is None:
+        print("[LOG_DRIVE] service=None, skip")
         return
     try:
         from datetime import datetime as _dt2
@@ -517,6 +518,8 @@ def log_to_drive(service, message):
         ts       = now.strftime("%Y-%m-%d %H:%M:%S")
         entry    = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
+        print(f"[LOG_DRIVE] Saving to folder {TELEGRAM_LOG_FOLDER_ID}, file {filename}")
+
         # חיפוש קובץ היום בתיקייה
         res = service.files().list(
             q=f"name='{filename}' and '{TELEGRAM_LOG_FOLDER_ID}' in parents and trashed=false",
@@ -524,6 +527,7 @@ def log_to_drive(service, message):
             pageSize=5
         ).execute()
         files = res.get('files', [])
+        print(f"[LOG_DRIVE] Found {len(files)} existing files")
 
         if files:
             # קובץ קיים — משיכה ועדכון
@@ -538,16 +542,19 @@ def log_to_drive(service, message):
                 io.BytesIO(new_content.encode('utf-8')), mimetype='text/plain'
             )
             service.files().update(fileId=files[0]['id'], media_body=media).execute()
+            print(f"[LOG_DRIVE] ✅ Updated existing file {files[0]['id']}")
         else:
             # קובץ חדש
             media = MediaIoBaseUpload(
                 io.BytesIO(entry.encode('utf-8')), mimetype='text/plain'
             )
-            service.files().create(
+            result = service.files().create(
                 body={'name': filename, 'parents': [TELEGRAM_LOG_FOLDER_ID]},
                 media_body=media
             ).execute()
+            print(f"[LOG_DRIVE] ✅ Created new file {result.get('id')}")
     except Exception as e:
+        print(f"[LOG_DRIVE] ❌ ERROR: {e}")
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
 
