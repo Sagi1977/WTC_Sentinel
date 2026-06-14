@@ -505,17 +505,25 @@ def log_to_drive(service, message):
     """
     שומר כל הודעת טלגרם על ידי עדכון קובץ Google Doc קיים ב-Drive.
     משתמש ב-File ID ספציפי כדי לעקוף את בעיית יצירת הקבצים של חשבונות שירות.
+    זמן הלוג מומר לשעון ישראל (Jerusalem).
     """
     if service is None:
         return
     try:
         from datetime import datetime as _dt2
+        import pytz
         import io
         from googleapiclient.http import MediaIoBaseUpload
 
-        now      = _dt2.now()
-        ts       = now.strftime("%Y-%m-%d %H:%M:%S")
-        entry    = f"\n{'='*55}\n[{ts}]\n{message}\n"
+        # הגדרת אזור זמן ישראל
+        il_tz = pytz.timezone('Asia/Jerusalem')
+        
+        # לקיחת הזמן משרת ה-UTC והמרתו לישראל
+        now_utc = _dt2.now(pytz.utc)
+        now_il = now_utc.astimezone(il_tz)
+        
+        ts = now_il.strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
         # ה-ID המדויק של הקובץ שיצרת
         FILE_ID = '1vhM26xZOmnQqxNsQQnGuCa2XeorHv3N829O6qCpa_hM' 
@@ -523,6 +531,13 @@ def log_to_drive(service, message):
         # משיכת התוכן הקיים מהקובץ
         res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
         existing_content = res.decode('utf-8', errors='replace')
+        
+        # --- מנגנון ניקוי אוטומטי ---
+        # פירוק הטקסט לשורות ושמירת 1000 השורות האחרונות בלבד (מונע מהקובץ להתנפח)
+        lines = existing_content.split('\n')
+        if len(lines) > 1000:
+            lines = lines[-1000:] # חותך את ההיסטוריה הישנה
+            existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + '\n'.join(lines)
         
         # חיבור התוכן החדש לישן
         new_content = existing_content + entry
@@ -537,7 +552,7 @@ def log_to_drive(service, message):
             media_body=media
         ).execute()
 
-        log_event("INFO", "log_to_drive", "Successfully updated Drive log file.")
+        log_event("INFO", "log_to_drive", "Successfully updated Drive log file (IL Time).")
     except Exception as e:
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
