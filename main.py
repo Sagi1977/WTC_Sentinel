@@ -27,6 +27,7 @@ RTH_START = (9, 30)
 RTH_END_HOUR = 16
 
 DATA_CACHE = {}
+SIGNAL_HISTORY = {}   # Hysteresis — זיכרון Signal בין ריצות {ticker: (signal, count)}
 DEBUG_EVENTS = []
 
 # =========================================================
@@ -937,6 +938,21 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 metrics["wk_chg"], metrics["above_ma200"], metrics["dist_ma200"],
                 metrics["dist_52w_high"]
             )
+
+            # ── Hysteresis Filter — מונע אוסילציה BUY/WEAK ──────────────────
+            # BUY אמיתי = Signal BUY חייב להופיע 2 ריצות רצופות לפחות
+            # מונע מצב שמניה גבולית מקבלת BUY/WEAK/BUY/WEAK כל ריצה
+            prev_sig, prev_count = SIGNAL_HISTORY.get(ticker, ("", 0))
+            if signal == prev_sig:
+                new_count = prev_count + 1
+            else:
+                new_count = 1
+            SIGNAL_HISTORY[ticker] = (signal, new_count)
+
+            if signal == "🟢 BUY" and new_count < 2:
+                signal = "🟡 WEAK"  # ← שדרג ל-WEAK עד שיאושר בריצה נוספת
+                sig_reasons.append("Hysteresis(1/2)")
+            # ────────────────────────────────────────────────────────────────
 
             rows.append((
                 t, bucket, metrics["curr_p"], metrics["day_chg"], metrics["wk_chg"],
