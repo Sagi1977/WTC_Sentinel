@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # =========================================================
-# 1. CONFIG
+# 1. CONFIG 
 # =========================================================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = str(os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
