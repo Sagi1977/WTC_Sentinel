@@ -431,7 +431,8 @@ def build_dynamic_watchlist(service):
             golden_file_dt = parse_golden_file_dt(fname)
         try:
             tcol, sel, scol = validate_output_schema(df, prefix)
-            inv_col = next((c for c in df.columns if "invest" in str(c).lower()), None)
+            inv_col  = next((c for c in df.columns if "invest" in str(c).lower()), None)
+            stop_col = next((c for c in df.columns if "stop" in str(c).lower()), None)  # ✅ Sprint 1
             mask = df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
             for _, row in df[mask].iterrows():
                 ticker = str(row[tcol]).strip().upper()
@@ -442,6 +443,7 @@ def build_dynamic_watchlist(service):
                     "score": row.get(scol, np.nan) if scol else np.nan,
                     "source": prefix,
                     "invest": safe_float(row.get(inv_col, np.nan), 0.0) if inv_col else 0.0,
+                    "stop_loss": safe_float(row.get(stop_col, np.nan), 0.0) if stop_col else 0.0,  # ✅ Sprint 1
                 }
             logs.append(f"✅ {prefix}: Found {int(mask.sum())}")
         except Exception as e:
@@ -473,14 +475,19 @@ def parse_golden_file_dt(filename):
 def get_entry_baseline(ticker, file_dt):
     """
     מחזיר (entry_date, entry_open) — נקודת הכניסה לפי יישור הקו.
-    הקובץ נוצר בשעון ישראל; ET = ישראל פחות 7 שעות.
+    הקובץ נוצר בשעון ישראל; ההמרה ל-ET נעשית עם pytz (DST-safe).
     אם הקובץ נוצר לפני פתיחת השוק (09:30 ET) → הכניסה באותו יום מסחר.
     אחרת → ביום המסחר הבא. מחזיר (None, None) אם יום הכניסה טרם נסחר.
     """
     if file_dt is None:
         return None, None
     try:
-        file_et = file_dt - _td(hours=7)
+        # ✅ Sprint 1: המרה DST-safe עם pytz (במקום hours=7 קשיח)
+        israel_tz = pytz.timezone('Asia/Jerusalem')
+        et_tz     = pytz.timezone('America/New_York')
+        file_localized = israel_tz.localize(file_dt) if file_dt.tzinfo is None else file_dt
+        file_et = file_localized.astimezone(et_tz)
+
         target_date = file_et.date()
         if file_et.hour > 9 or (file_et.hour == 9 and file_et.minute >= 30):
             target_date = target_date + _td(days=1)
@@ -557,7 +564,30 @@ def log_to_drive(service, message):
     except Exception as e:
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
-def classify_portfolio_status(day_chg, wk_chg):
+def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_loss=None):
+    """
+    ✅ Sprint 1: סטטוס entry-relative.
+    עדיפות 1: Stop Loss חצוי → ❌ Bel (יציאה!)
+    עדיפות 2: P&L מהכניסה (אם קיים) קובע את הסטטוס
+    fallback:  ההיגיון הישן (wk_chg/day_chg) אם אין entry data
+    """
+    # עדיפות 1 — Stop Loss חצוי = יציאה מיידית, בלי קשר לשום דבר אחר
+    if stop_loss is not None and curr_price is not None and stop_loss > 0 and curr_price < stop_loss:
+        return "❌ Bel", "BELOW STOP LOSS — EXIT NOW"
+
+    # עדיפות 2 — סטטוס לפי P&L אמיתי מהכניסה
+    if pnl is not None:
+        if pnl >= 8 and day_chg >= 0:
+            return "✅ Str", "Strong gain from entry"
+        if pnl >= 3:
+            return "👀 Bld", "Building from entry"
+        if pnl >= -1.5:
+            return "🟦 Hold", "Holding near entry"
+        if pnl >= -4:
+            return "⚠️ Weak", "Losing from entry"
+        return "❌ Bel", "Deep loss from entry"
+
+    # fallback — ההיגיון הישן (למקרה שאין entry baseline)
     if wk_chg >= 8 and day_chg >= 1:
         return "✅ Str", "Strong weekly and daily action"
     if wk_chg >= 3 and day_chg >= 0:
@@ -626,9 +656,11 @@ def get_portfolio_performance(watchlist, golden_file_dt=None):
 
             # ✅ P&L מאז הכניסה (יישור קו: פתיחת היום שאחרי קובץ Golden)
             pnl_str, vsqqq_str = "  —  ", "  —  "
+            pnl_val = None  # ✅ Sprint 1: entry-relative P&L ל-status
             _, entry_open = get_entry_baseline(t, golden_file_dt)
             if entry_open and entry_open > 0:
                 pnl = calc_pct_change(curr_p, entry_open)
+                pnl_val = pnl
                 pnl_str = f"{pnl:>+5.1f}"
                 if qqq_ret is not None:
                     vsqqq_str = f"{(pnl - qqq_ret):>+5.1f}"
@@ -638,7 +670,14 @@ def get_portfolio_performance(watchlist, golden_file_dt=None):
                 total_invest += inv
                 total_pnl_weighted += pnl * inv
 
-            status, _ = classify_portfolio_status(day_chg, wk_chg)
+            # ✅ Sprint 1: סטטוס entry-relative + Stop Loss check
+            sl = safe_float(info.get("stop_loss", 0.0), 0.0)
+            status, _ = classify_portfolio_status(
+                day_chg, wk_chg,
+                pnl=pnl_val,
+                curr_price=curr_p,
+                stop_loss=sl if sl > 0 else None
+            )
             lbl = str(info.get("label", "")).strip()
             lbl = (lbl[:7] + ".") if len(lbl) > 8 else lbl[:8]
             report.append(
