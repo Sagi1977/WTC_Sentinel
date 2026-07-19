@@ -28,7 +28,7 @@ RTH_START = (9, 30)
 RTH_END_HOUR = 16
 
 DATA_CACHE = {}
-SIGNAL_HISTORY = {}   # Hysteresis — זיכרון Signal בין ריצות {ticker: (signal, count)}
+# SIGNAL_HISTORY הוסר — ראה הערה ב-build_underdog_list (Hysteresis bug)
 DEBUG_EVENTS = []
 
 # =========================================================
@@ -979,19 +979,11 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 metrics["dist_52w_high"]
             )
 
-            # ── Hysteresis Filter — מונע אוסילציה BUY/WEAK ──────────────────
-            # BUY אמיתי = Signal BUY חייב להופיע 2 ריצות רצופות לפחות
-            # מונע מצב שמניה גבולית מקבלת BUY/WEAK/BUY/WEAK כל ריצה
-            prev_sig, prev_count = SIGNAL_HISTORY.get(t, ("", 0))
-            if signal == prev_sig:
-                new_count = prev_count + 1
-            else:
-                new_count = 1
-            SIGNAL_HISTORY[t] = (signal, new_count)
-
-            if signal == "🟢 BUY" and new_count < 2:
-                signal = "🟡 WEAK"  # ← שדרג ל-WEAK עד שיאושר בריצה נוספת
-                sig_reasons.append("Hysteresis(1/2)")
+            # ── Hysteresis — הוסר (18/07/2026) ──────────────────────────────
+            # הבאג: SIGNAL_HISTORY הוא dict בזיכרון. כל ריצה של GitHub Actions
+            # היא תהליך חדש → ה-dict מתאתחל → prev_count תמיד 0 → new_count
+            # תמיד 1 → כל 🟢 BUY שודרג ל-🟡 WEAK. תוצאה: אפס BUY בשבוע 6 שלם.
+            # אם יוחזר בעתיד — חובה persistence ל-Drive בין ריצות.
             # ────────────────────────────────────────────────────────────────
 
             rows.append((
