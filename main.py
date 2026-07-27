@@ -22,6 +22,18 @@ TOP_N = 10
 SHOW_DEBUG = str(os.environ.get("SHOW_DEBUG", "false")).lower() == "true"
 DRIVE_PREFIXES = ["Golden_Plan_STOCKS"]  # ETF הוסר — מיקוד במניות בלבד
 TELEGRAM_LOG_FOLDER_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"  # TELEGRAM WEB folder
+
+# ✅ Sharpe/Sortino/Drawdown History (27/07/2026)
+# ---------------------------------------------------------------
+# הקמה חד-פעמית (בדיוק כמו שעשית ל-Daily Log):
+#   1. צור Google Doc ריק חדש ב-Drive שלך (שם מוצע: "WTC_Perf_History")
+#   2. מתוך ה-URL של הקובץ (docs.google.com/document/d/<FILE_ID>/edit)
+#      העתק את ה-<FILE_ID> והדבק כאן במקום ה-placeholder
+#   3. ודא שה-service account שלך (אותו אחד שכבר עובד ל-Daily Log) הוא
+#      Editor על הקובץ הזה
+# בלי זה — הקוד ירוץ בבטחה (try/except) אבל שורת ה-Sharpe/Sortino לא תופיע
+PERF_HISTORY_FILE_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"
+
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
 RTH_START = (9, 30)
@@ -565,6 +577,157 @@ def log_to_drive(service, message):
     except Exception as e:
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
+
+# =========================================================
+# ✅ Performance History — Sharpe / Sortino / Max Drawdown (27/07/2026)
+# ---------------------------------------------------------------
+# עקרון: כל שבוע (מזוהה לפי golden_file_dt) מקבל שורה אחת בקובץ CSV
+# ששמור ב-Drive. כל הרצה (כמה פעמים ביום) מעדכנת (UPSERT) את השורה של
+# השבוע הנוכחי עם ה-Alpha העדכני ביותר — כך שבסוף השבוע, כשמופיע Golden
+# Plan חדש, השורה הישנה כבר "קפאה" על הערך האחרון שלה. אין צורך לזהות
+# "סוף שבוע" באופן מיוחד.
+# חשוב: זה קורא/כותב ל-PERF_HISTORY_FILE_ID בלבד — קובץ נפרד לגמרי
+# מה-Daily Log (TELEGRAM), כדי לא לסכן קטיעה של הלוג הקיים ל-1000 שורות
+# (נתוני ביצועים לא אמורים להיחתך לעולם).
+# =========================================================
+
+def _perf_sharpe(returns_pct, periods_per_year=52):
+    """גרסה קומפקטית (ללא numpy) של Sharpe Ratio - עקבית עם performance_metrics.py"""
+    n = len(returns_pct)
+    if n < 2:
+        return None
+    r = [x / 100.0 for x in returns_pct]
+    mean = sum(r) / n
+    var = sum((x - mean) ** 2 for x in r) / (n - 1)
+    std = var ** 0.5
+    if std == 0:
+        return None
+    return (mean / std) * (periods_per_year ** 0.5)
+
+
+def _perf_sortino(returns_pct, periods_per_year=52):
+    """גרסה קומפקטית של Sortino Ratio - עקבית עם performance_metrics.py"""
+    n = len(returns_pct)
+    if n < 2:
+        return None
+    r = [x / 100.0 for x in returns_pct]
+    mean = sum(r) / n
+    downside = [x for x in r if x < 0]
+    if not downside:
+        return None
+    downside_dev = (sum(x ** 2 for x in downside) / len(downside)) ** 0.5
+    if downside_dev == 0:
+        return None
+    return (mean / downside_dev) * (periods_per_year ** 0.5)
+
+
+def _perf_max_drawdown(returns_pct):
+    """גרסה קומפקטית של Max Drawdown - עקבית עם performance_metrics.py"""
+    equity, peak, max_dd = 1.0, 1.0, 0.0
+    for x in returns_pct:
+        equity *= (1 + x / 100.0)
+        peak = max(peak, equity)
+        dd = (equity - peak) / peak
+        max_dd = min(max_dd, dd)
+    return max_dd * 100
+
+
+def get_perf_history(service):
+    """
+    קורא את היסטוריית הביצועים מ-Drive. מחזיר list of dicts:
+    [{'week_key': '2026-07-21', 'portfolio_return_pct': -5.9, 'qqq_return_pct': -3.2, 'alpha_pct': -2.8}, ...]
+    מסודר כרונולוגית. מחזיר [] בכל כשל (שקט, לא עוצר את הריצה).
+    """
+    if service is None or not PERF_HISTORY_FILE_ID or "PASTE_YOUR" in PERF_HISTORY_FILE_ID:
+        return []
+    try:
+        res = service.files().export_media(fileId=PERF_HISTORY_FILE_ID, mimeType='text/plain').execute()
+        content = res.decode('utf-8', errors='replace').strip()
+        if not content:
+            return []
+        rows = []
+        for line in content.split('\n'):
+            parts = line.strip().split(',')
+            if len(parts) != 4:
+                continue
+            try:
+                rows.append({
+                    'week_key': parts[0],
+                    'portfolio_return_pct': float(parts[1]),
+                    'qqq_return_pct': float(parts[2]),
+                    'alpha_pct': float(parts[3]),
+                })
+            except ValueError:
+                continue
+        rows.sort(key=lambda r: r['week_key'])
+        return rows
+    except Exception as e:
+        log_event("WARN", "get_perf_history", "read failed - returning empty history", error=str(e)[:120])
+        return []
+
+
+def upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha):
+    """
+    מעדכן (או מוסיף) את השורה של week_key עם הערכים העדכניים ביותר,
+    ושומר בחזרה ל-Drive. לא זורק שגיאה החוצה - כשל כאן לא אמור לעצור
+    את שאר הדוח.
+    """
+    if service is None or not PERF_HISTORY_FILE_ID or "PASTE_YOUR" in PERF_HISTORY_FILE_ID:
+        return
+    try:
+        history = get_perf_history(service)
+        found = False
+        for row in history:
+            if row['week_key'] == week_key:
+                row['portfolio_return_pct'] = round(port_ret, 3)
+                row['qqq_return_pct'] = round(qqq_ret, 3)
+                row['alpha_pct'] = round(alpha, 3)
+                found = True
+                break
+        if not found:
+            history.append({
+                'week_key': week_key,
+                'portfolio_return_pct': round(port_ret, 3),
+                'qqq_return_pct': round(qqq_ret, 3),
+                'alpha_pct': round(alpha, 3),
+            })
+        history.sort(key=lambda r: r['week_key'])
+
+        content = '\n'.join(
+            f"{r['week_key']},{r['portfolio_return_pct']},{r['qqq_return_pct']},{r['alpha_pct']}"
+            for r in history
+        )
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        service.files().update(fileId=PERF_HISTORY_FILE_ID, media_body=media).execute()
+    except Exception as e:
+        log_event("WARN", "upsert_perf_history", "write failed - history not updated this run", error=str(e)[:120])
+
+
+def format_perf_summary(history, min_weeks_for_confidence=20):
+    """
+    בונה את שורת הדוח עם Sharpe/Sortino/MaxDD. מחזיר מחרוזת ריקה אם אין
+    מספיק נתונים (n<2) כדי לא להציג מדדים חסרי משמעות.
+    """
+    n = len(history)
+    if n < 2:
+        return ""
+
+    alpha_series = [r['alpha_pct'] for r in history]
+    port_series = [r['portfolio_return_pct'] for r in history]
+
+    sharpe_a = _perf_sharpe(alpha_series)
+    sortino_a = _perf_sortino(alpha_series)
+    mdd_p = _perf_max_drawdown(port_series)
+
+    sharpe_str = f"{sharpe_a:.2f}" if sharpe_a is not None else "N/A"
+    sortino_str = f"{sortino_a:.2f}" if sortino_a is not None else "N/A"
+
+    lines = [f"📐 Perf History ({n} שבועות): Sharpe(α)={sharpe_str} | Sortino(α)={sortino_str} | MaxDD(Portfolio)={mdd_p:+.1f}%"]
+    if n < min_weeks_for_confidence:
+        lines.append(f"   ⚠️ מדגם קטן ({n}/{min_weeks_for_confidence}+) — אינדיקציה ראשונית, לא מסקנה סטטיסטית")
+    return '\n'.join(lines)
+
+
 def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_loss=None):
     """
     ✅ Sprint 1: סטטוס entry-relative.
@@ -600,7 +763,7 @@ def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_l
     return "❌ Bel", "Below acceptable strength"
 
 
-def get_portfolio_performance(watchlist, golden_file_dt=None):
+def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     if not watchlist:
         return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
 
@@ -696,6 +859,16 @@ def get_portfolio_performance(watchlist, golden_file_dt=None):
         alpha = port_ret - qqq_ret
         icon = "✅" if alpha >= 0 else "🔻"
         report.append(f"📊 Portfolio: {port_ret:+.1f}% | QQQ: {qqq_ret:+.1f}% | Alpha: {alpha:+.1f}% {icon}")
+
+        # ✅ Perf History (27/07/2026): UPSERT השבוע הנוכחי + הצגת Sharpe/Sortino/MaxDD
+        # לא עוצר את הדוח אם נכשל (try/except פנימי בכל פונקציה)
+        if golden_file_dt is not None:
+            week_key = golden_file_dt.strftime('%Y-%m-%d')
+            upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha)
+            history = get_perf_history(service)
+            perf_line = format_perf_summary(history)
+            if perf_line:
+                report.append(perf_line)
     elif golden_file_dt is not None and qqq_entry_open is None:
         report.append("📊 Alpha: — (יום הכניסה טרם נסחר)")
 
@@ -1039,7 +1212,7 @@ def main():
     dashboard = get_market_dashboard()
     dashboard += f"\n🔍 Diagnostics:\n{drive_logs}\n"
 
-    portfolio = get_portfolio_performance(watchlist, golden_file_dt)
+    portfolio = get_portfolio_performance(watchlist, golden_file_dt, service=service)
     regime, market_note = get_market_regime()
     execution_scan = run_execution_scan(service, regime=regime, market_note=market_note)
 
