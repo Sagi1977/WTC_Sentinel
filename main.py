@@ -32,7 +32,7 @@ TELEGRAM_LOG_FOLDER_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"  # TELEGRAM WEB fol
 #   3. ודא שה-service account שלך (אותו אחד שכבר עובד ל-Daily Log) הוא
 #      Editor על הקובץ הזה
 # בלי זה — הקוד ירוץ בבטחה (try/except) אבל שורת ה-Sharpe/Sortino לא תופיע
-PERF_HISTORY_FILE_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"
+PERF_HISTORY_FILE_ID = "1mnkis101utoLZ735XOSvWqxzDzZKUuIxzClz-Py-4tM"
 
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
