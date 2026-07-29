@@ -706,26 +706,30 @@ def upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha):
 def format_perf_summary(history, min_weeks_for_confidence=20):
     """
     בונה את שורת הדוח עם Sharpe/Sortino/MaxDD. מחזיר מחרוזת ריקה אם אין
-    מספיק נתונים (n<2) כדי לא להציג מדדים חסרי משמעות.
+    מספיק נתונים (n<2), או אם משהו נכשל בחישוב עצמו — במקרה כזה זו
+    מחרוזת ריקה, לא חריגה שתופיע החוצה.
     """
-    n = len(history)
-    if n < 2:
-        return ""
+    try:
+        n = len(history)
+        if n < 2:
+            return ""
 
-    alpha_series = [r['alpha_pct'] for r in history]
-    port_series = [r['portfolio_return_pct'] for r in history]
+        alpha_series = [r['alpha_pct'] for r in history]
+        port_series = [r['portfolio_return_pct'] for r in history]
 
-    sharpe_a = _perf_sharpe(alpha_series)
-    sortino_a = _perf_sortino(alpha_series)
-    mdd_p = _perf_max_drawdown(port_series)
+        sharpe_a = _perf_sharpe(alpha_series)
+        sortino_a = _perf_sortino(alpha_series)
+        mdd_p = _perf_max_drawdown(port_series)
 
-    sharpe_str = f"{sharpe_a:.2f}" if sharpe_a is not None else "N/A"
-    sortino_str = f"{sortino_a:.2f}" if sortino_a is not None else "N/A"
+        sharpe_str = f"{sharpe_a:.2f}" if sharpe_a is not None else "N/A"
+        sortino_str = f"{sortino_a:.2f}" if sortino_a is not None else "N/A"
 
-    lines = [f"📐 Perf History ({n} שבועות): Sharpe(α)={sharpe_str} | Sortino(α)={sortino_str} | MaxDD(Portfolio)={mdd_p:+.1f}%"]
-    if n < min_weeks_for_confidence:
-        lines.append(f"   ⚠️ מדגם קטן ({n}/{min_weeks_for_confidence}+) — אינדיקציה ראשונית, לא מסקנה סטטיסטית")
-    return '\n'.join(lines)
+        lines = [f"📐 Perf History ({n} שבועות): Sharpe(α)={sharpe_str} | Sortino(α)={sortino_str} | MaxDD(Portfolio)={mdd_p:+.1f}%"]
+        if n < min_weeks_for_confidence:
+            lines.append(f"   ⚠️ מדגם קטן ({n}/{min_weeks_for_confidence}+) — אינדיקציה ראשונית, לא מסקנה סטטיסטית")
+        return '\n'.join(lines)
+    except Exception:
+        return ""  # כשל בחישוב = פשוט לא מציגים את השורה, לא מפילים את הדוח
 
 
 def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_loss=None):
@@ -860,15 +864,20 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         icon = "✅" if alpha >= 0 else "🔻"
         report.append(f"📊 Portfolio: {port_ret:+.1f}% | QQQ: {qqq_ret:+.1f}% | Alpha: {alpha:+.1f}% {icon}")
 
-        # ✅ Perf History (27/07/2026): UPSERT השבוע הנוכחי + הצגת Sharpe/Sortino/MaxDD
-        # לא עוצר את הדוח אם נכשל (try/except פנימי בכל פונקציה)
-        if golden_file_dt is not None:
-            week_key = golden_file_dt.strftime('%Y-%m-%d')
-            upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha)
-            history = get_perf_history(service)
-            perf_line = format_perf_summary(history)
-            if perf_line:
-                report.append(perf_line)
+        # ✅ Perf History (27/07/2026) — תוקן 28/07/2026: עכשיו הכל בתוך try/except
+        # אחד ברמת הקריאה עצמה. לפני התיקון, רק upsert/get היו מוגנים
+        # פנימית — אבל format_perf_summary וההרכבה עצמה לא, ותקלה שם
+        # הייתה יכולה להפיל את כל הדוח (כולל השליחה לטלגרם והלוג!).
+        try:
+            if golden_file_dt is not None:
+                week_key = golden_file_dt.strftime('%Y-%m-%d')
+                upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha)
+                history = get_perf_history(service)
+                perf_line = format_perf_summary(history)
+                if perf_line:
+                    report.append(perf_line)
+        except Exception as e:
+            log_event("ERROR", "get_portfolio_performance", "perf history block failed - report continues", error=str(e)[:160])
     elif golden_file_dt is not None and qqq_entry_open is None:
         report.append("📊 Alpha: — (יום הכניסה טרם נסחר)")
 
