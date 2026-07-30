@@ -642,23 +642,41 @@ def get_perf_history(service):
         return []
     try:
         res = service.files().export_media(fileId=PERF_HISTORY_FILE_ID, mimeType='text/plain').execute()
-        content = res.decode('utf-8', errors='replace').strip()
+        # 🔧 תוקן 29/07/2026: decode עם utf-8-sig מסיר BOM בתחילת הקובץ,
+        # אבל Google Docs מכניס גם תווים בלתי-נראים בתחילת *כל שורה*
+        # (לא רק שורה ראשונה) — לכן מנקים כל שורה בנפרד למטה.
+        content = res.decode('utf-8-sig', errors='replace').strip()
         if not content:
             return []
         rows = []
         for line in content.split('\n'):
-            parts = line.strip().split(',')
+            # 🔧 מסירים כל תו לא-נראה/BOM מתחילת השורה (\ufeff וכדומה),
+            # לא רק רווחים רגילים — .strip() לבד לא תופס את זה
+            clean_line = line.lstrip('\ufeff\u200b\u200c\u200d ').strip()
+            parts = clean_line.split(',')
             if len(parts) != 4:
                 continue
             try:
+                # ניקוי דומה גם על ה-week_key עצמו (הגנה כפולה)
+                week_key_clean = re.sub(r'[^\d\-]', '', parts[0])
                 rows.append({
-                    'week_key': parts[0],
+                    'week_key': week_key_clean,
                     'portfolio_return_pct': float(parts[1]),
                     'qqq_return_pct': float(parts[2]),
                     'alpha_pct': float(parts[3]),
                 })
             except ValueError:
                 continue
+
+        # 🔧 תוקן 29/07/2026: ניקוי כפילויות — שומר את המופע האחרון לכל
+        # week_key. זה מרפא בעצמו קבצים שכבר הצטברו בהם כפילויות (כמו
+        # הבאג עם ה-BOM שגרם ל-12 שורות לאותו תאריך) — בהרצה הבאה, הכתיבה
+        # החוזרת תשמור רק שורה אחת נקייה לכל שבוע.
+        deduped = {}
+        for row in rows:
+            deduped[row['week_key']] = row  # מופע מאוחר יותר דורס מוקדם
+        rows = list(deduped.values())
+
         rows.sort(key=lambda r: r['week_key'])
         return rows
     except Exception as e:
