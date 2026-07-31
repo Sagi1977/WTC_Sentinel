@@ -588,6 +588,9 @@ def log_to_drive(service, message):
         ).execute()
 
         log_event("INFO", "log_to_drive", "Successfully updated Drive log file (IL Time).")
+        # 🔧 אבחון זמני (29/07/2026) — הדפסה שתמיד מופיעה, בלי תלות ב-SHOW_DEBUG,
+        # כדי לדעת בוודאות אם הכתיבה הצליחה ולאיזה FILE_ID בדיוק
+        print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
     except Exception as e:
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
 
