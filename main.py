@@ -34,6 +34,15 @@ TELEGRAM_LOG_FOLDER_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"  # TELEGRAM WEB fol
 # בלי זה — הקוד ירוץ בבטחה (try/except) אבל שורת ה-Sharpe/Sortino לא תופיע
 PERF_HISTORY_FILE_ID = "1mnkis101utoLZ735XOSvWqxzDzZKUuIxzClz-Py-4tM"
 
+# ✅ Signal Hysteresis History (29/07/2026)
+# ---------------------------------------------------------------
+# תיקון לבאג המתועד למטה ("Hysteresis הוסר 18/07/2026") — הפעם עם
+# persistence אמיתי ל-Drive, לפי ריצת סוף-יום (23:15 ישראל) בלבד —
+# לא לפי ספירת ריצות תוך-יומיות (זה בדיוק מה שנשבר בפעם הקודמת).
+# הקמה: אותו תהליך בדיוק כמו PERF_HISTORY_FILE_ID למעלה — Google Doc
+# ריק חדש, לשתף עם אותו service account, ולהדביק את ה-ID כאן.
+SIGNAL_HISTORY_FILE_ID = "PASTE_YOUR_NEW_FILE_ID_HERE"
+
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
 RTH_START = (9, 30)
@@ -750,6 +759,105 @@ def format_perf_summary(history, min_weeks_for_confidence=20):
         return ""  # כשל בחישוב = פשוט לא מציגים את השורה, לא מפילים את הדוח
 
 
+# =========================================================
+# ✅ Signal Hysteresis — אישור BUY על פני ≥2 ימי מסחר (29/07/2026)
+# ---------------------------------------------------------------
+# עקרון: בניגוד לניסיון הקודם (שספר "ריצות רצופות" בזיכרון, ונשבר כי
+# GitHub Actions הוא תהליך חדש בכל פעם) — כאן שומרים רק *ריצת סוף-יום
+# אחת* לכל מניה לכל יום מסחר, ב-Drive. סיגנל BUY מוצג כ"מאושר" רק אם
+# גם ביום המסחר הקודם שנשמר הציון היה ≥5 (BUY-worthy). זה תואם את מה
+# שנפוץ בעולם המסחר: אישור על פני timeframe ארוך יותר (יום מול יום),
+# לא עוד ועוד בדיקות תוך-יומיות (שרועשות מטבען, למשל RVol).
+# =========================================================
+
+def is_end_of_day_run():
+    """
+    בודק אם ההרצה הנוכחית היא ריצת 'סוף היום' (23:15 ישראל, לפי
+    sentinel_run.yml) — רק ריצה כזו כותבת ל-Signal Hysteresis History.
+    """
+    try:
+        from datetime import datetime as _dt3
+        il_tz = pytz.timezone('Asia/Jerusalem')
+        return _dt3.now(il_tz).hour == 23
+    except Exception:
+        return False
+
+
+def get_signal_history(service):
+    """
+    קורא היסטוריית סיגנלים מ-Drive. מחזיר dict:
+    {ticker: [(date_str, score), ...]} ממוין כרונולוגית לכל מניה.
+    מחזיר {} בכל כשל (שקט, לא עוצר את הריצה).
+    """
+    if service is None or not SIGNAL_HISTORY_FILE_ID or "PASTE_YOUR" in SIGNAL_HISTORY_FILE_ID:
+        return {}
+    try:
+        res = service.files().export_media(fileId=SIGNAL_HISTORY_FILE_ID, mimeType='text/plain').execute()
+        content = res.decode('utf-8-sig', errors='replace').strip()
+        if not content:
+            return {}
+        history = {}
+        for line in content.split('\n'):
+            clean_line = line.lstrip('\ufeff\u200b\u200c\u200d ').strip()
+            parts = clean_line.split(',')
+            if len(parts) != 3:
+                continue
+            try:
+                ticker = parts[0].strip()
+                date_str = re.sub(r'[^\d\-]', '', parts[1])
+                score = float(parts[2])
+                history.setdefault(ticker, {})[date_str] = score  # dict = דה-דופ אוטומטי
+            except ValueError:
+                continue
+        return {t: sorted(d.items()) for t, d in history.items()}
+    except Exception as e:
+        log_event("WARN", "get_signal_history", "read failed - returning empty", error=str(e)[:120])
+        return {}
+
+
+def upsert_signal_history(service, updates, max_days_per_ticker=5):
+    """
+    updates: dict {ticker: (date_str, score)} — עדכון סוף-יום אחד לכל
+    מניה. שומר רק max_days_per_ticker הימים האחרונים לכל מניה כדי
+    שהקובץ לא יתנפח עם השבועות.
+    """
+    if service is None or not SIGNAL_HISTORY_FILE_ID or "PASTE_YOUR" in SIGNAL_HISTORY_FILE_ID:
+        return
+    try:
+        history = get_signal_history(service)
+        for ticker, (date_str, score) in updates.items():
+            existing = dict(history.get(ticker, []))
+            existing[date_str] = round(float(score), 2)
+            history[ticker] = sorted(existing.items())[-max_days_per_ticker:]
+
+        lines = []
+        for ticker, days in history.items():
+            for date_str, score in days:
+                lines.append(f"{ticker},{date_str},{score}")
+        content = '\n'.join(lines)
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        service.files().update(fileId=SIGNAL_HISTORY_FILE_ID, media_body=media).execute()
+    except Exception as e:
+        log_event("WARN", "upsert_signal_history", "write failed - history not updated", error=str(e)[:120])
+
+
+def confirm_buy_signal(signal, sig_score, ticker, history, today_str, buy_threshold=5, required_days=2):
+    """
+    משדרג BUY ל'מאושר' רק אם גם ביום המסחר הקודם שנשמר הציון היה
+    ≥buy_threshold. לא נוגע ב-WEAK/WAIT/AVOID — רק ב-BUY.
+    מחזיר: (signal_להצגה, is_confirmed: bool)
+    """
+    if signal != "🟢 BUY":
+        return signal, False
+    days = [d for d in history.get(ticker, []) if d[0] != today_str]  # לא כולל היום עצמו
+    if len(days) < required_days - 1:
+        return "🟡 PENDING (Day 1/2)", False
+    last_date, last_score = days[-1]
+    if last_score >= buy_threshold:
+        return "🟢 BUY", True
+    return "🟡 PENDING (Day 1/2)", False
+
+
 def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_loss=None):
     """
     ✅ Sprint 1: סטטוס entry-relative.
@@ -794,7 +902,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     if golden_file_dt is not None:
         report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
     report.append("-" * 64)
-    report.append("Type | Ticker | Price | Day% | Wk% | P&L% | vsQQQ | Status")
+    report.append("Type | Ticker | Entry | Price | Day% | Wk% | P&L% | vsQQQ | Status")
     report.append("-" * 64)
 
     # QQQ baseline פעם אחת — אותה נקודת כניסה לכל הפוזיציות
@@ -819,7 +927,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
             if session_df is None or session_df.empty or close_s is None or close_s.empty or open_s is None or open_s.empty:
-                report.append(f"{'N/D':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ⚠️")
+                report.append(f"{'N/D':<9} | {t:<6} | {'—':>6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ⚠️")
                 log_event("WARN", "get_portfolio_performance", "missing intraday data", ticker=t)
                 continue
 
@@ -866,11 +974,12 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             )
             lbl = str(info.get("label", "")).strip()
             lbl = (lbl[:7] + ".") if len(lbl) > 8 else lbl[:8]
+            entry_str = f"{entry_open:>6.2f}" if entry_open and entry_open > 0 else f"{'—':>6}"
             report.append(
-                f"{lbl:<9} | {t:<6} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {pnl_str}% | {vsqqq_str}% | {status}"
+                f"{lbl:<9} | {t:<6} | {entry_str} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {pnl_str}% | {vsqqq_str}% | {status}"
             )
         except Exception as e:
-            report.append(f"{'Err':<9} | {t:<6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ❌")
+            report.append(f"{'Err':<9} | {t:<6} | {'—':>6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ❌")
             log_event("ERROR", "get_portfolio_performance", "portfolio row failed", ticker=t, error=str(e)[:160])
 
     report.append("-" * 64)
@@ -1148,6 +1257,16 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     rows = []
     drop_counts = {}
 
+    # ✅ Hysteresis (29/07/2026) — נטען פעם אחת לכל הריצה, לא לכל מניה בנפרד
+    is_eod = is_end_of_day_run()
+    from datetime import datetime as _dt4
+    try:
+        today_str = _dt4.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
+    except Exception:
+        today_str = _dt4.now().strftime('%Y-%m-%d')
+    signal_history = get_signal_history(service) if service is not None else {}
+    eod_updates = {}
+
     spy_session = get_latest_rth_session("SPY", period="5d")
     spy_close = extract_col(spy_session, "Close")
     if spy_close is not None:
@@ -1179,11 +1298,12 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
                 metrics["dist_52w_high"]
             )
 
-            # ── Hysteresis — הוסר (18/07/2026) ──────────────────────────────
-            # הבאג: SIGNAL_HISTORY הוא dict בזיכרון. כל ריצה של GitHub Actions
-            # היא תהליך חדש → ה-dict מתאתחל → prev_count תמיד 0 → new_count
-            # תמיד 1 → כל 🟢 BUY שודרג ל-🟡 WEAK. תוצאה: אפס BUY בשבוע 6 שלם.
-            # אם יוחזר בעתיד — חובה persistence ל-Drive בין ריצות.
+            # ── Hysteresis (תוקן 29/07/2026) — persistence אמיתי ל-Drive ──────
+            # לפי יום מסחר (23:15 ישראל), לא לפי ספירת ריצות תוך-יומיות —
+            # ראה הערת התיקון המלאה ליד get_signal_history/confirm_buy_signal.
+            signal, _is_confirmed = confirm_buy_signal(signal, sig_score, t, signal_history, today_str)
+            if is_eod:
+                eod_updates[t] = (today_str, sig_score)
             # ────────────────────────────────────────────────────────────────
 
             rows.append((
@@ -1194,6 +1314,10 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
         except Exception as e:
             drop_counts["execution_exception"] = drop_counts.get("execution_exception", 0) + 1
             log_event("ERROR", "run_execution_scan", "candidate failed", ticker=t, error=str(e)[:160])
+
+    # ✅ שמירה ל-Drive רק בריצת סוף-יום, ורק אם היה מה לעדכן
+    if is_eod and eod_updates and service is not None:
+        upsert_signal_history(service, eod_updates)
 
     rows.sort(key=lambda x: x[-1], reverse=True)
     rows = rows[:TOP_N]
