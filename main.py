@@ -41,7 +41,7 @@ PERF_HISTORY_FILE_ID = "1mnkis101utoLZ735XOSvWqxzDzZKUuIxzClz-Py-4tM"
 # לא לפי ספירת ריצות תוך-יומיות (זה בדיוק מה שנשבר בפעם הקודמת).
 # הקמה: אותו תהליך בדיוק כמו PERF_HISTORY_FILE_ID למעלה — Google Doc
 # ריק חדש, לשתף עם אותו service account, ולהדביק את ה-ID כאן.
-SIGNAL_HISTORY_FILE_ID = "PASTE_YOUR_NEW_FILE_ID_HERE"
+SIGNAL_HISTORY_FILE_ID = "1c3uo8Okn0dBDyWfMDvl8UoL-N0Qdw-_eYwoEcrdjVHw"
 
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
@@ -561,7 +561,7 @@ def log_to_drive(service, message):
         entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
         # ה-ID המדויק של הקובץ שיצרת
-        FILE_ID = '1vhM26xZOmnQqxNsQQnGuCa2XeorHv3N829O6qCpa_hM' 
+        FILE_ID = '1H0XnJrj7mwQK_7dLtCFw6wxWMK61IchobvPFP4c-xlI'  # 🔧 עודכן 30/07/2026 — מסמך חדש, הישן היה בלתי-נגיש
 
         # משיכת התוכן הקיים מהקובץ
         res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
