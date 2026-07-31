@@ -1354,27 +1354,75 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 # 9. MAIN ORCHESTRATOR
 # =========================================================
 def main():
+    # 🔧 תוקן 29/07/2026 — ממצא קריטי: main() לא הייתה מוגנת בשום try/except.
+    # אם כל שלב באמצע נכשל (למשל run_execution_scan) — כל הריצה קרסה, ולא
+    # נשלחה שום הודעה לטלגרם ולא נכתב שום דבר ל-Daily Log, גם לא לחלקים
+    # שכן הצליחו לפני הכשל. עכשיו כל שלב מוגן בנפרד עם ברירת מחדל, כדי
+    # שכשל חלקי לא ימנע דיווח של השאר.
     validate_environment()
-    # איפוס cache בכל ריצה — מבטיח נתונים טריים מ-yfinance
-    DATA_CACHE.clear()
-    service = get_drive_service()
+    DATA_CACHE.clear()  # איפוס cache בכל ריצה — מבטיח נתונים טריים מ-yfinance
 
-    watchlist, drive_logs, golden_file_dt = build_dynamic_watchlist(service)
-    dashboard = get_market_dashboard()
+    try:
+        service = get_drive_service()
+    except Exception as e:
+        service = None
+        log_event("ERROR", "main", "get_drive_service failed - continuing without Drive", error=str(e)[:160])
+
+    try:
+        watchlist, drive_logs, golden_file_dt = build_dynamic_watchlist(service)
+    except Exception as e:
+        watchlist, drive_logs, golden_file_dt = {}, "⚠️ build_dynamic_watchlist failed", None
+        log_event("ERROR", "main", "build_dynamic_watchlist failed", error=str(e)[:160])
+
+    try:
+        dashboard = get_market_dashboard()
+    except Exception as e:
+        dashboard = "⚠️ Dashboard failed to load"
+        log_event("ERROR", "main", "get_market_dashboard failed", error=str(e)[:160])
     dashboard += f"\n🔍 Diagnostics:\n{drive_logs}\n"
 
-    portfolio = get_portfolio_performance(watchlist, golden_file_dt, service=service)
-    regime, market_note = get_market_regime()
-    execution_scan = run_execution_scan(service, regime=regime, market_note=market_note)
+    try:
+        portfolio = get_portfolio_performance(watchlist, golden_file_dt, service=service)
+    except Exception as e:
+        portfolio = "⚠️ Portfolio report failed this run — see logs"
+        log_event("ERROR", "main", "get_portfolio_performance failed", error=str(e)[:160])
+
+    try:
+        regime, market_note = get_market_regime()
+    except Exception as e:
+        regime, market_note = "UNKNOWN", ""
+        log_event("ERROR", "main", "get_market_regime failed", error=str(e)[:160])
+
+    try:
+        execution_scan = run_execution_scan(service, regime=regime, market_note=market_note)
+    except Exception as e:
+        execution_scan = "⚠️ Execution Scan failed this run — see logs"
+        log_event("ERROR", "main", "run_execution_scan failed", error=str(e)[:160])
 
     if SHOW_DEBUG:
-        dashboard += "\n🧪 Debug Summary:\n" + get_debug_summary(15) + "\n"
+        try:
+            dashboard += "\n🧪 Debug Summary:\n" + get_debug_summary(15) + "\n"
+        except Exception as e:
+            log_event("ERROR", "main", "get_debug_summary failed", error=str(e)[:160])
 
-    send_msg(f"{dashboard}\n{portfolio}")
-    log_to_drive(service, f"{dashboard}\n{portfolio}")
+    # ✅ שני הבלוקים נשלחים/נרשמים ללא תלות אחד בשני — כשל באחד לא חוסם את האחר
+    try:
+        send_msg(f"{dashboard}\n{portfolio}")
+    except Exception as e:
+        log_event("ERROR", "main", "send_msg (dashboard+portfolio) failed", error=str(e)[:160])
+    try:
+        log_to_drive(service, f"{dashboard}\n{portfolio}")
+    except Exception as e:
+        log_event("ERROR", "main", "log_to_drive (dashboard+portfolio) failed", error=str(e)[:160])
 
-    send_msg(execution_scan)
-    log_to_drive(service, execution_scan)
+    try:
+        send_msg(execution_scan)
+    except Exception as e:
+        log_event("ERROR", "main", "send_msg (execution_scan) failed", error=str(e)[:160])
+    try:
+        log_to_drive(service, execution_scan)
+    except Exception as e:
+        log_event("ERROR", "main", "log_to_drive (execution_scan) failed", error=str(e)[:160])
 
 
 if __name__ == "__main__":
