@@ -56,11 +56,16 @@ DEBUG_EVENTS = []
 # 2. DEBUG / LOGGING
 # =========================================================
 def log_event(level, where, message, **kwargs):
+    # 🔧 תוקן 29/07/2026 — ממצא קריטי: SHOW_DEBUG=False כברירת מחדל (אין
+    # אותו מוגדר ב-workflow), כלומר log_event מעולם לא הדפיס כלום, גם על
+    # שגיאות אמיתיות. זה הפך את כל ה-try/except החדשים ב-main() לשקטים
+    # לגמרי — אי אפשר היה לדעת שמשהו נכשל, לא בלוג של GitHub Actions
+    # ולא בשום מקום אחר. עכשיו: ERROR תמיד מודפס, בלי קשר ל-SHOW_DEBUG.
     payload = {"level": level, "where": where, "message": message}
     if kwargs:
         payload.update(kwargs)
     DEBUG_EVENTS.append(payload)
-    if SHOW_DEBUG:
+    if SHOW_DEBUG or level == "ERROR":
         print(f"[{level}] {where}: {message} | {kwargs if kwargs else ''}")
 
 
