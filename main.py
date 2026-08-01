@@ -1129,7 +1129,14 @@ def confidence_signal(rs, rvol, vwap_pct, rsi, wk_chg, above_ma200, dist_ma200, 
 def calc_rank(sw, score_val, wk_chg, rvol, rs, vwap_pct, rsi, status, tier_score=50.0):
     score_part      = safe_float(score_val, 0.0) / 12.0
     week_part       = max(min(wk_chg, 25.0), 0.0) / 6.0
-    rs_part         = max(rs, 0.0) * 1.5
+    # 🔧 עודכן (31/07/2026) — היה max(rs, 0.0) בלי תקרה עליונה. rvol_part ו-
+    # week_part כן היו עם תקרה (3.0 ו-25.0 בהתאמה), אבל rs_part לא — יום RS
+    # קיצוני יחיד (למשל 30-40, שכזכור קורה בדיוק סביב דוחות/חדשות — אותו
+    # סוג אירוע שכבר ראינו שפוגע ב-BJRI/CROX/ARQT) יכול היה לייצר rank
+    # שמנפח פי כמה מכל שאר הרכיבים גם יחד ולעקוף אפילו את משקל ה-sw*10.
+    # התקרה (15.0, כמו טווח ה-RS הסביר של "מומנטום אמיתי" ב-confidence_signal
+    # שם הרף העליון rs>10 כבר נחשב המקסימום) מיישרת את זה עם שאר הרכיבים.
+    rs_part         = min(max(rs, 0.0), 15.0) * 1.5
     rvol_part       = min(max(rvol, 0.0), 3.0)
     rsi_balance     = max(0.0, 60.0 - abs(rsi - 60.0)) / 20.0
     extension_penalty = max(vwap_pct - 2.0, 0.0) * 1.5
@@ -1171,8 +1178,41 @@ def classify_execution_status(regime, wk_chg, rvol, rs, vwap_pct, rsi):
     return "Bel", 0, "Below threshold"
 
 
+def is_earnings_trap_radar(ticker, safe_mode=False):
+    """
+    🔧 חדש (31/07/2026) — הרדאר היומי (build_underdog_list/run_execution_scan)
+    לא היה מוגן בכלל מפני דוחות מתקרבים — בניגוד ל-Golden_Plan שכבר תוקן.
+    זו אותה בדיקה בדיוק (BDay(5), אותם 3 שדות yfinance נכונים), מועתקת הנה
+    כדי שגם מועמדי הרדאר (ה-100 שנסרקים כל יום) יקבלו את אותה הגנה.
+    safe_mode=False (בניגוד ל-Golden_Plan) כדי שכשל ברשת לא יחסום את כל
+    הרדאר היומי בטעות — כאן מדובר ברשימת מעקב, לא בהמלצת קנייה ישירה.
+    """
+    try:
+        from datetime import datetime as _dt_ert  # מקומי, כמו בכל שאר הקובץ
+        t = yf.Ticker(ticker)
+        info = t.info
+        now = _dt_ert.now()
+        window_end = now + pd.tseries.offsets.BDay(5)
+        for key in ('earningsTimestampStart', 'earningsTimestamp', 'earningsTimestampEnd'):
+            ts = info.get(key)
+            if ts:
+                earn_date = _dt_ert.fromtimestamp(ts)
+                if now <= earn_date <= window_end:
+                    return True
+        return False
+    except Exception:
+        return safe_mode
+
+
 def compute_intraday_metrics(ticker, spy_day_chg=0.0):
     drop_reason = None
+
+    # ── Earnings Trap Guard (חדש, 31/07/2026) ──────────────────────
+    # אותו חלון 5 ימי-מסחר נגללים שכבר אושר ל-Golden_Plan. מניה שעומדת
+    # לדווח בקרוב לא אמורה להיכנס לרדאר היומי כמועמדת "פריצה הבאה" —
+    # בדיוק אותו סיכון (BJRI/CROX) שכבר טיפלנו בו בצד השני של המערכת.
+    if is_earnings_trap_radar(ticker):
+        return None, "earnings_trap_5d"
     session_df = get_latest_rth_session(ticker, period="5d")
     close_s = extract_col(session_df, "Close")
     open_s = extract_col(session_df, "Open")
