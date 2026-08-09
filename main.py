@@ -130,7 +130,16 @@ def send_msg(text, retries=2, sleep_seconds=0.5):
 # 5. DRIVE / OUTPUTS
 # =========================================================
 def get_drive_service():
-    creds, _ = google.auth.default()
+    # 🔧 תיקון 09/08/2026: google.auth.default() בלי scopes מפורש, עם
+    # Workload Identity Federation (כמו ב-sentinel_run.yml), נוטה להחזיר
+    # הרשאות עם scope כללי (cloud-platform) שלא תמיד כולל גישה מספקת
+    # ל-Drive/Docs API (בפרט export_media, ש-log_to_drive משתמשת בו).
+    # התוצאה בפועל: build() מצליח (לא זורק שגיאה), אבל קריאות ה-API
+    # בפועל נכשלות עם 403/insufficient scope - בדיוק התסמין המדווח
+    # ("הכל עובד חוץ מ-Daily Log"). הוספת ה-scope המפורש היא הפתרון
+    # הישיר לתבנית הזו.
+    SCOPES = ['https://www.googleapis.com/auth/drive']
+    creds, _ = google.auth.default(scopes=SCOPES)
     return build("drive", "v3", credentials=creds)
 
 
