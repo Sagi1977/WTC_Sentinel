@@ -1065,12 +1065,20 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
 # יורדת מתחת ל-MA200) הרבה לפני שהמחיר בפועל שובר את ה-Stop Loss שלה.
 # classify_portfolio_status() למעלה כבר בודק Stop Loss (מחיר) ו-P&L
 # (מחיר גם הוא) - שניהם מגיבים רק *אחרי* שהנזק כבר נראה במחיר.
-# confidence_signal() כבר קיים בקובץ הזה בדיוק ומחשב היחלשות אמיתית
-# (RS, RVol, VWAP extension, RSI, MA200, מרחק משיא 52 שבועות) - אבל עד
-# עכשיו הוא מחובר רק ל-run_execution_scan (רדאר "underdogs" - מניות
-# שלא נבחרו), לא לפוזיציות שבאמת מוחזקות ב-watchlist. הפונקציה כאן
-# מפעילה בדיוק אותה לוגיקה קיימת ומאומתת - לא ממציאה סיגנל חדש - על
-# המניות המוחזקות בפועל, כתוספת ל-Stop Loss, לא במקומו.
+#
+# 🔧 (26/09/2026) — גרסה ראשונה השתמשה ב-confidence_signal() הקיים
+# (RS/RVol/VWAP/RSI/MA200/52wHigh) כמו שהוא, בהנחה שאותה לוגיקה שכבר
+# רצה על ה-underdogs מתאימה גם כאן. בבדיקה מול תרחיש AMP (-10.40%
+# באותו שבוע) התגלו שני באגים אמיתיים: (1) compute_intraday_metrics()
+# מכיל שער wk_chg>=5 שהיה פעיל ללא תנאי - מניה יורדת הייתה מדולגת
+# בשקט לפני שהיא מגיעה לניקוד בכלל (0% סיכוי להתראה). (2)
+# confidence_signal() עצמו בנוי למטרה ההפוכה - דירוג מועמד-*קנייה*
+# חדש (New Buy Candidate) - ולא מעניש ירידה שבועית, מסחר מתחת ל-VWAP,
+# או נפח-מכירה. שני הבאגים תוקנו: פרמטר require_min_weekly_change
+# (False כאן, True ב-run_execution_scan - ראו שם) + exit_risk_signal()
+# ייעודי, שכל גורם בו נבדק במפורש בכיוון הסיכון-לרדת (ראו התיעוד המלא
+# בהגדרתו). confidence_signal() נשאר ללא שינוי ב-run_execution_scan,
+# ששם ההיגיון המקורי שלו (מועמד-קנייה חדש) עדיין נכון.
 # =========================================================
 def get_early_weakness_alerts(watchlist):
     if not watchlist:
@@ -1091,24 +1099,27 @@ def get_early_weakness_alerts(watchlist):
     alerts = []
     for t in watchlist.keys():
         try:
-            # שימוש חוזר במלוא compute_intraday_metrics — אותם נתונים,
-            # אותה לוגיקה מאומתת שכבר רצה על ה-underdogs. אין דילוג
-            # week_change_below_threshold כאן: מניה מוחזקת נבדקת תמיד,
-            # בניגוד למועמד-רדאר חדש שדורש wk_chg>=5 כדי בכלל להיכנס.
-            metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg)
+            # 🔧 (26/09/2026) — תוקן: require_min_weekly_change=False בפועל
+            # עוקף כאן את הסינון wk_chg>=5 (קודם הפרמטר לא היה קיים בכלל,
+            # וההערה כאן טענה בטעות שהסינון לא חל - בפועל הוא כן חל, ומניה
+            # יורדת הייתה מדולגת בשקט לפני שהיא נבדקת). וגם: שימוש ב-
+            # exit_risk_signal (לא confidence_signal) — זה ציון ייעודי
+            # לזיהוי היחלשות של פוזיציה מוחזקת, לא לדירוג מועמד-קנייה חדש.
+            # ראו את התיעוד המלא בהגדרת exit_risk_signal.
+            metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg, require_min_weekly_change=False)
             if metrics is None:
                 log_event("INFO", "get_early_weakness_alerts", "skipped", ticker=t, reason=drop_reason)
                 continue
-            signal, sig_score, reasons = confidence_signal(
+            signal, sig_score, reasons = exit_risk_signal(
                 metrics["rs"], metrics["rvol"], metrics["vwap_pct"], metrics["rsi"],
-                metrics["wk_chg"], metrics["above_ma200"], metrics["dist_ma200"],
+                metrics["wk_chg"], metrics["day_chg"], metrics["above_ma200"], metrics["dist_ma200"],
                 metrics["dist_52w_high"],
             )
-            if signal in ("🟡 WEAK", "⚪ AVOID"):
+            if signal in ("🔴 EXIT RISK", "🟠 CAUTION"):
                 alerts.append(
                     f"⚠️ {t}: {signal} (ציון {sig_score}) — {', '.join(reasons)}\n"
-                    f"    RS(vsSPY)={metrics['rs']:+.1f} | RVol={metrics['rvol']:.1f}x | "
-                    f"RSI={metrics['rsi']:.0f} | מעל MA200={'כן' if metrics['above_ma200'] else 'לא'}"
+                    f"    RS(vsSPY)={metrics['rs']:+.1f} | RVol={metrics['rvol']:.1f}x | Day%={metrics['day_chg']:+.1f}% | Wk%={metrics['wk_chg']:+.1f}%\n"
+                    f"    RSI={metrics['rsi']:.0f} | VWAP%={metrics['vwap_pct']:+.1f}% | מעל MA200={'כן' if metrics['above_ma200'] else 'לא'}"
                 )
         except Exception as e:
             log_event("ERROR", "get_early_weakness_alerts", "check failed", ticker=t, error=str(e)[:160])
@@ -1232,6 +1243,84 @@ def confidence_signal(rs, rvol, vwap_pct, rsi, wk_chg, above_ma200, dist_ma200, 
     return signal, score, reasons
 
 
+def exit_risk_signal(rs, rvol, vwap_pct, rsi, wk_chg, day_chg, above_ma200, dist_ma200, dist_52w_high):
+    """
+    🆕 (26/09/2026) — ציון סיכון-יציאה למניה **מוחזקת**, נפרד מ-confidence_signal.
+
+    למה נפרד: confidence_signal() נבנה למטרה ההפוכה — לדרג עד כמה מועמד-רדאר
+    חדש הוא הזדמנות-קנייה חזקה (רשם + ל-RS גבוה, RVol גבוה, קרבה לשיא 52
+    שבועות, MA200 חיובי). כשבדקתי אם המנגנון היה תופס מניה כמו AMP (שנפלה
+    -10.40% באותו שבוע) גיליתי שהוא לא היה: (1) wk_chg שלילי לא מקבל שום
+    ניקוד שלילי שם — רק wk_chg>15 (עלייה חדה) נבדק; (2) RVol גבוה מקבל שם
+    בונוס תמיד, גם אם הוא נובע ממכירת פאניקה ביום ירוד, כי אין בדיקה מול
+    כיוון היום (day_chg); (3) vwap_pct שלילי (מסחר מתחת ל-VWAP - חולשה
+    תוך-יומית) לא מקבל שם שום עונש, רק vwap_pct>5 נבדק. כלומר מניה שקורסת
+    יכלה לצבור ניקוד "בריא" ולפספס את ההתראה לגמרי.
+
+    כאן ההפך: כל גורם נבדק במפורש לכיוון הסיכון-לרדת, כולל הבחנה בין נפח
+    שמאשר עלייה (חיובי) לנפח שמאשר מכירה/הפצה (שלילי, day_chg<0).
+    מחזיר: (signal, score, reasons)
+    """
+    score = 0
+    reasons = []
+
+    # 1. RS מול SPY — חולשה יחסית מתמשכת (Jegadeesh-Titman, כיוון הפוך)
+    if rs < -10:
+        score += 3; reasons.append("RS--- (חולשה קשה מול השוק)")
+    elif rs < -3:
+        score += 2; reasons.append("RS-- (נחות מהשוק)")
+    elif rs > 3:
+        score -= 1; reasons.append("RS+ (עדיין מוביל את השוק)")
+
+    # 2. נפח — ההבחנה הקריטית: נפח גבוה ביום ירוד = הפצה/מכירה אמיתית,
+    #    לא אישוש של עלייה. זה בדיוק מה ש-confidence_signal לא בדק.
+    if day_chg < 0 and rvol > 1.5:
+        score += 3; reasons.append("Vol--- (הפצה בנפח גבוה ביום ירוד)")
+    elif day_chg < 0 and rvol > 1.0:
+        score += 1; reasons.append("Vol- (נפח מוגבר ביום ירוד)")
+    elif day_chg > 0 and rvol > 1.5:
+        score -= 1; reasons.append("Vol+ (נפח קונים אמיתי)")
+
+    # 3. VWAP% — מסחר מתחת ל-VWAP תוך-יומי = המוכרים שולטים היום
+    if vwap_pct < -3:
+        score += 2; reasons.append("VWAP-- (מתחת ל-VWAP באופן משמעותי)")
+    elif vwap_pct < -1:
+        score += 1; reasons.append("VWAP- (מתחת ל-VWAP)")
+    elif vwap_pct > 1:
+        score -= 1; reasons.append("VWAP+ (הקונים מגנים על המחיר)")
+
+    # 4. MA200 — שבירת מגמה ארוכת-טווח
+    if not above_ma200:
+        score += 2; reasons.append("MA200-- (שבר מגמה ארוכת טווח)")
+    elif 0 <= dist_ma200 < 3:
+        score += 1; reasons.append("MA200~ (קרוב לשבירה)")
+
+    # 5. RSI — היחלשות מומנטום (לא "oversold=קנה", אלא "חולשה נמשכת")
+    if rsi < 35:
+        score += 2; reasons.append("RSI-- (מומנטום חלש מאוד)")
+    elif rsi < 45:
+        score += 1; reasons.append("RSI- (מומנטום נחלש)")
+    elif rsi > 55:
+        score -= 1; reasons.append("RSI+ (מומנטום עדיין בריא)")
+
+    # 6. wk_chg — הגורם שהיה חסר לגמרי ב-confidence_signal לכיוון הזה.
+    #    זה בדיוק התרחיש של AMP: ירידה שבועית חדה היא איתות סיכון ישיר,
+    #    לא ניטרלי.
+    if wk_chg < -8:
+        score += 3; reasons.append(f"WK-שבועי {wk_chg:+.1f}% (ירידה חדה)")
+    elif wk_chg < -3:
+        score += 1; reasons.append(f"WK-שבועי {wk_chg:+.1f}%")
+
+    if score >= 7:
+        signal = "🔴 EXIT RISK"
+    elif score >= 4:
+        signal = "🟠 CAUTION"
+    else:
+        signal = "🟢 OK"
+
+    return signal, score, reasons
+
+
 def calc_rank(sw, score_val, wk_chg, rvol, rs, vwap_pct, rsi, status, tier_score=50.0):
     score_part      = safe_float(score_val, 0.0) / 12.0
     week_part       = max(min(wk_chg, 25.0), 0.0) / 6.0
@@ -1310,7 +1399,7 @@ def is_earnings_trap_radar(ticker, safe_mode=False):
         return safe_mode
 
 
-def compute_intraday_metrics(ticker, spy_day_chg=0.0):
+def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=True):
     drop_reason = None
 
     # ── Earnings Trap Guard (חדש, 31/07/2026) ──────────────────────
@@ -1345,7 +1434,17 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0):
     if wk_open <= 0:
         return None, "missing_week_open"
     wk_chg = calc_pct_change(curr_p, wk_open)
-    if wk_chg < 5:
+    # 🔧 באג קריטי שתוקן (26/09/2026) — עד עכשיו השורה הבאה הייתה תמיד
+    # פעילה (בלי שום פרמטר), גם כשנקראה מ-get_early_weakness_alerts. כלומר
+    # מניה מוחזקת שנופלת (למשל AMP, wk_chg=-10.4%) הייתה מקבלת כאן
+    # "week_change_below_threshold" ומדלגת *לפני* שהיא בכלל מגיעה ל-
+    # confidence_signal — בדיוק המקרה שההתראה הזו נועדה לתפוס. ההערה
+    # שהייתה ב-get_early_weakness_alerts טענה בטעות שהסינון עוקף כאן -
+    # בפועל הוא לא היה. עכשיו: run_execution_scan (מחפש "פריצה הבאה")
+    # ממשיך לדרוש wk_chg>=5 כמו קודם; get_early_weakness_alerts מעביר
+    # require_min_weekly_change=False כדי שמניה מוחזקת תמיד תיבדק, גם
+    # (ובעיקר) כשהיא יורדת.
+    if require_min_weekly_change and wk_chg < 5:
         return None, "week_change_below_threshold"
 
     # משיכת שנה שלמה — לחישוב RVol + MA200 + 52week high (משיכה אחת)
