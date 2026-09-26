@@ -550,9 +550,19 @@ def log_to_drive(service, message):
     שומר כל הודעת טלגרם על ידי עדכון קובץ Google Doc קיים ב-Drive.
     משתמש ב-File ID ספציפי כדי לעקוף את בעיית יצירת הקבצים של חשבונות שירות.
     זמן הלוג מומר לשעון ישראל (Jerusalem).
+
+    🔧 (26/09/2026) — ממצא: עד עכשיו, אם service היה None, הפונקציה הזו
+    פשוט עשתה return בשקט - בלי אף log_event, בלי שום עקבה. כלומר אם
+    האותנטיקציה ל-Drive נכשלת (בדיוק התבנית המתועדת ב-get_drive_service:
+    build() מצליח אבל קריאות בפועל נכשלות), לא היה שום סימן שהלוג בכלל
+    לא נכתב - לא בקונסול, לא בטלגרם. עכשיו: תמיד log_event, ותמיד
+    מחזירה True/False כדי שההרצה שקוראת לה תדע אם לדווח על כשל בטלגרם
+    (הערוץ שבאמת עוקבים אחריו) ולא רק בלוג של GitHub Actions שאף אחד
+    לא פותח בזמן אמת.
     """
     if service is None:
-        return
+        log_event("ERROR", "log_to_drive", "Drive service is None - log NOT written this run")
+        return False
     try:
         from datetime import datetime as _dt2
         import pytz
@@ -606,8 +616,10 @@ def log_to_drive(service, message):
         # 🔧 אבחון זמני (29/07/2026) — הדפסה שתמיד מופיעה, בלי תלות ב-SHOW_DEBUG,
         # כדי לדעת בוודאות אם הכתיבה הצליחה ולאיזה FILE_ID בדיוק
         print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
+        return True
     except Exception as e:
         log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
+        return False
 
 
 # =========================================================
@@ -1542,14 +1554,24 @@ def main():
         except Exception as e:
             log_event("ERROR", "main", "get_debug_summary failed", error=str(e)[:160])
 
+    # ✅ (26/09/2026) — מעקב אחרי הצלחת/כשל כתיבת ה-Daily Log ל-Drive.
+    # למה זה חדש: log_to_drive עד עכשיו רק הדפיסה שגיאה לקונסול של
+    # GitHub Actions (שאף אחד לא פותח בזמן אמת) - הטלגרם (הערוץ שבאמת
+    # עוקבים אחריו) לא ידע כלום על כשל בכתיבה ל-Daily Log. עכשיו: כל
+    # קריאה נרשמת ל-drive_log_results, ובסוף הריצה - אם משהו נכשל -
+    # נשלחת התראה מפורשת בטלגרם עם הסיבה האמיתית (מתוך DEBUG_EVENTS).
+    drive_log_results = []
+
     # ✅ שני הבלוקים נשלחים/נרשמים ללא תלות אחד בשני — כשל באחד לא חוסם את האחר
     try:
         send_msg(f"{dashboard}\n{portfolio}")
     except Exception as e:
         log_event("ERROR", "main", "send_msg (dashboard+portfolio) failed", error=str(e)[:160])
     try:
-        log_to_drive(service, f"{dashboard}\n{portfolio}")
+        ok = log_to_drive(service, f"{dashboard}\n{portfolio}")
+        drive_log_results.append(("dashboard+portfolio", ok))
     except Exception as e:
+        drive_log_results.append(("dashboard+portfolio", False))
         log_event("ERROR", "main", "log_to_drive (dashboard+portfolio) failed", error=str(e)[:160])
 
     # ✅ בלוק עצמאי (26/09/2026) — כשל כאן לא חוסם dashboard/portfolio/execution_scan
@@ -1559,8 +1581,10 @@ def main():
         except Exception as e:
             log_event("ERROR", "main", "send_msg (early_alerts) failed", error=str(e)[:160])
         try:
-            log_to_drive(service, early_alerts)
+            ok = log_to_drive(service, early_alerts)
+            drive_log_results.append(("early_alerts", ok))
         except Exception as e:
+            drive_log_results.append(("early_alerts", False))
             log_event("ERROR", "main", "log_to_drive (early_alerts) failed", error=str(e)[:160])
 
     try:
@@ -1568,9 +1592,32 @@ def main():
     except Exception as e:
         log_event("ERROR", "main", "send_msg (execution_scan) failed", error=str(e)[:160])
     try:
-        log_to_drive(service, execution_scan)
+        ok = log_to_drive(service, execution_scan)
+        drive_log_results.append(("execution_scan", ok))
     except Exception as e:
+        drive_log_results.append(("execution_scan", False))
         log_event("ERROR", "main", "log_to_drive (execution_scan) failed", error=str(e)[:160])
+
+    # ✅ (26/09/2026) — התראה גלויה בטלגרם אם ה-Daily Log נכשל, עם הסיבה
+    # האמיתית (מהחריגה שנתפסה), כדי שכשל לא יתגלה רק כשמנסים לשלוף
+    # היסטוריה שבועית ומגלים שהיא ריקה.
+    failed_writes = [name for name, ok in drive_log_results if not ok]
+    if failed_writes:
+        recent_log_errors = [
+            f"- {ev['where']}: {ev.get('error', ev['message'])}"
+            for ev in DEBUG_EVENTS
+            if ev.get("level") == "ERROR" and ev.get("where") in ("log_to_drive", "get_drive_service")
+        ][-5:]
+        alert_text = (
+            "🚨 DAILY LOG (Drive) — כשל כתיבה!\n"
+            f"נכשלו {len(failed_writes)}/{len(drive_log_results)}: {', '.join(failed_writes)}\n"
+        )
+        if recent_log_errors:
+            alert_text += "\nסיבה (מה-log):\n" + "\n".join(recent_log_errors)
+        try:
+            send_msg(alert_text)
+        except Exception as e:
+            log_event("ERROR", "main", "send_msg (drive log failure alert) failed", error=str(e)[:160])
 
 
 if __name__ == "__main__":
