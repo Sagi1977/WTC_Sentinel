@@ -579,8 +579,14 @@ def log_to_drive(service, message):
         # --- מנגנון ניקוי אוטומטי ---
         # פירוק הטקסט לשורות ושמירת 1000 השורות האחרונות בלבד (מונע מהקובץ להתנפח)
         lines = existing_content.split('\n')
-        if len(lines) > 1000:
-            lines = lines[-1000:] # חותך את ההיסטוריה הישנה
+        # 🔧 תיקון 02/09/2026: הרף הישן (1000 שורות) התמלא כמעט בכל הרצה
+        # בודדת - ההיסטוריה נמחקה תוך שעות, לא ימים. הועלה ל-76,000 שורות
+        # (~950K תווים) - קרוב למקסימום הבטוח של Google Docs (~1.02M
+        # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
+        # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
+        # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
+        if len(lines) > 76000:
+            lines = lines[-76000:] # חותך את ההיסטוריה הישנה
             existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + '\n'.join(lines)
         
         # חיבור התוכן החדש לישן
@@ -1028,6 +1034,74 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     return "\n".join(report) + "\n"
 
 
+# =========================================================
+# 🆕 Early Weakness Alerts — היחלשות אמיתית, לא רק Stop Loss (26/09/2026)
+# ---------------------------------------------------------------
+# רקע: השוואת שתי הרצות Golden Plan מ-21/09 (09:27 ET מול 14:03 ET)
+# הראתה שמניה יכולה להיחלש באמת (RS מתמוטט מול SPY/QQQ, נפח נעלם,
+# יורדת מתחת ל-MA200) הרבה לפני שהמחיר בפועל שובר את ה-Stop Loss שלה.
+# classify_portfolio_status() למעלה כבר בודק Stop Loss (מחיר) ו-P&L
+# (מחיר גם הוא) - שניהם מגיבים רק *אחרי* שהנזק כבר נראה במחיר.
+# confidence_signal() כבר קיים בקובץ הזה בדיוק ומחשב היחלשות אמיתית
+# (RS, RVol, VWAP extension, RSI, MA200, מרחק משיא 52 שבועות) - אבל עד
+# עכשיו הוא מחובר רק ל-run_execution_scan (רדאר "underdogs" - מניות
+# שלא נבחרו), לא לפוזיציות שבאמת מוחזקות ב-watchlist. הפונקציה כאן
+# מפעילה בדיוק אותה לוגיקה קיימת ומאומתת - לא ממציאה סיגנל חדש - על
+# המניות המוחזקות בפועל, כתוספת ל-Stop Loss, לא במקומו.
+# =========================================================
+def get_early_weakness_alerts(watchlist):
+    if not watchlist:
+        return ""
+    try:
+        spy_session = get_latest_rth_session("SPY", period="5d")
+        spy_close = extract_col(spy_session, "Close")
+        if spy_close is not None:
+            spy_close = spy_close.dropna()
+        spy_day_chg = (
+            calc_pct_change(float(spy_close.iloc[-1]), float(spy_close.iloc[0]))
+            if spy_close is not None and len(spy_close) > 1 else 0.0
+        )
+    except Exception as e:
+        log_event("ERROR", "get_early_weakness_alerts", "spy baseline failed", error=str(e)[:160])
+        spy_day_chg = 0.0
+
+    alerts = []
+    for t in watchlist.keys():
+        try:
+            # שימוש חוזר במלוא compute_intraday_metrics — אותם נתונים,
+            # אותה לוגיקה מאומתת שכבר רצה על ה-underdogs. אין דילוג
+            # week_change_below_threshold כאן: מניה מוחזקת נבדקת תמיד,
+            # בניגוד למועמד-רדאר חדש שדורש wk_chg>=5 כדי בכלל להיכנס.
+            metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg)
+            if metrics is None:
+                log_event("INFO", "get_early_weakness_alerts", "skipped", ticker=t, reason=drop_reason)
+                continue
+            signal, sig_score, reasons = confidence_signal(
+                metrics["rs"], metrics["rvol"], metrics["vwap_pct"], metrics["rsi"],
+                metrics["wk_chg"], metrics["above_ma200"], metrics["dist_ma200"],
+                metrics["dist_52w_high"],
+            )
+            if signal in ("🟡 WEAK", "⚪ AVOID"):
+                alerts.append(
+                    f"⚠️ {t}: {signal} (ציון {sig_score}) — {', '.join(reasons)}\n"
+                    f"    RS(vsSPY)={metrics['rs']:+.1f} | RVol={metrics['rvol']:.1f}x | "
+                    f"RSI={metrics['rsi']:.0f} | מעל MA200={'כן' if metrics['above_ma200'] else 'לא'}"
+                )
+        except Exception as e:
+            log_event("ERROR", "get_early_weakness_alerts", "check failed", ticker=t, error=str(e)[:160])
+
+    if not alerts:
+        return ""
+    return (
+        "\n⚠️⚠️ EARLY WEAKNESS ALERTS — לפני Stop Loss! ⚠️⚠️\n"
+        "------------------------------------------------\n"
+        + "\n".join(alerts) + "\n"
+        "------------------------------------------------\n"
+        "👉 אלו לא Stop Loss שנחצה - אלו סימני היחלשות אמיתית (RS/נפח/מגמה) "
+        "שהמחיר עדיין לא בהכרח שיקף. שווה לשקול יציאה מוקדמת ולא לחכות שה-SL יופעל.\n"
+    )
+
+
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS")]:  # ETF הוסר
@@ -1451,6 +1525,12 @@ def main():
         log_event("ERROR", "main", "get_market_regime failed", error=str(e)[:160])
 
     try:
+        early_alerts = get_early_weakness_alerts(watchlist)
+    except Exception as e:
+        early_alerts = ""
+        log_event("ERROR", "main", "get_early_weakness_alerts failed", error=str(e)[:160])
+
+    try:
         execution_scan = run_execution_scan(service, regime=regime, market_note=market_note)
     except Exception as e:
         execution_scan = "⚠️ Execution Scan failed this run — see logs"
@@ -1471,6 +1551,17 @@ def main():
         log_to_drive(service, f"{dashboard}\n{portfolio}")
     except Exception as e:
         log_event("ERROR", "main", "log_to_drive (dashboard+portfolio) failed", error=str(e)[:160])
+
+    # ✅ בלוק עצמאי (26/09/2026) — כשל כאן לא חוסם dashboard/portfolio/execution_scan
+    if early_alerts:
+        try:
+            send_msg(early_alerts)
+        except Exception as e:
+            log_event("ERROR", "main", "send_msg (early_alerts) failed", error=str(e)[:160])
+        try:
+            log_to_drive(service, early_alerts)
+        except Exception as e:
+            log_event("ERROR", "main", "log_to_drive (early_alerts) failed", error=str(e)[:160])
 
     try:
         send_msg(execution_scan)
