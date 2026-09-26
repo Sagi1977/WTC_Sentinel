@@ -43,6 +43,15 @@ PERF_HISTORY_FILE_ID = "1mnkis101utoLZ735XOSvWqxzDzZKUuIxzClz-Py-4tM"
 # ריק חדש, לשתף עם אותו service account, ולהדביק את ה-ID כאן.
 SIGNAL_HISTORY_FILE_ID = "1c3uo8Okn0dBDyWfMDvl8UoL-N0Qdw-_eYwoEcrdjVHw"
 
+# ✅ Exit-Risk Deterioration Baseline (26/09/2026)
+# ---------------------------------------------------------------
+# תיעוד ל-Drive של "הרגע הראשון היום" שבו מניה מוחזקת סומנה EXIT
+# RISK/CAUTION — כדי ש-get_early_weakness_alerts תוכל להבחין בין
+# החמרה שנמשכת בפועל לבין התאוששות (bounce). ראו ההערה המלאה ליד
+# track_exit_deterioration למטה. הקמה: אותו תהליך כמו SIGNAL_HISTORY_FILE_ID
+# למעלה — Google Doc ריק חדש, לשתף עם אותו service account, להדביק ID כאן.
+EXIT_BASELINE_FILE_ID = "1tEGATqVMyOEEWlNM7PFAbgAxT0IH0nED19qBrYYFEbw"
+
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
 RTH_START = (9, 30)
@@ -1080,7 +1089,131 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
 # בהגדרתו). confidence_signal() נשאר ללא שינוי ב-run_execution_scan,
 # ששם ההיגיון המקורי שלו (מועמד-קנייה חדש) עדיין נכון.
 # =========================================================
-def get_early_weakness_alerts(watchlist):
+# =========================================================
+# ✅ Exit-Risk Deterioration Confirmation — מבוסס אינדיקטורים, לא מונה-ריצות (26/09/2026)
+# ---------------------------------------------------------------
+# רקע: backtest אמיתי (26/09, 720 תצפיות היסטוריות) הראה שמניה
+# שמסומנת EXIT RISK/CAUTION הרבה פעמים *מתאוששת* בהמשך (oversold
+# bounce) ולא ממשיכה ליפול. לכן "לחכות ל-N ריצות רצופות עם אותה
+# התראה" הוא הקריטריון הלא-נכון — מספר-ריצות הוא שרירותי ולא קשור
+# לשאלה האמיתית: האם ההתדרדרות הטכנית נמשכת בפועל.
+#
+# העיקרון: כשמניה נכנסת ל-EXIT RISK/CAUTION בפעם הראשונה באותו יום
+# מסחר, שומרים "בייסליין" — RSI/מחיר/VWAP%/ציון של אותו רגע — ל-Drive
+# (main.py הוא stateless בין ריצות, כמו שכבר נלמד ב-Signal Hysteresis
+# למעלה: GitHub Actions מריץ תהליך חדש בכל פעם). בכל ריצה הבאה של
+# אותו יום, משווים את הקריאה העדכנית לבייסליין: אם RSI/מחיר/VWAP%
+# מראים לפחות שני סימני התאוששות (או סימן אחד + הציון עצמו יורד) —
+# זו בדיוק תבנית ה-bounce שה-backtest חשף, וההתראה נשארת "ראשונית",
+# לא "מאושרת". אם האינדיקטורים לא מתאוששים — ההתדרדרות "מאושרת",
+# והבייסליין מתעדכן לנקודה הגרועה ביותר שנראתה היום (כדי שהתאוששות
+# עתידית תימדד מול השפל, לא מול הקריאה הראשונה).
+# =========================================================
+
+RECOVERY_TOLERANCE_PCT = 0.5   # % סבילות במחיר/VWAP% לפני שנחשב "התאוששות"
+RSI_RECOVERY_TOLERANCE = 3.0   # נקודות RSI סבילות לפני שנחשב "התאוששות"
+
+
+def get_exit_baselines(service):
+    """
+    קורא בייסליינים של החמרה תוך-יומית מ-Drive.
+    מחזיר dict: {ticker: {"date","score","rsi","price","vwap_pct"}}.
+    מחזיר {} בכל כשל (שקט, לא עוצר את הריצה).
+    """
+    if service is None or not EXIT_BASELINE_FILE_ID or "PASTE_YOUR" in EXIT_BASELINE_FILE_ID:
+        return {}
+    try:
+        res = service.files().export_media(fileId=EXIT_BASELINE_FILE_ID, mimeType='text/plain').execute()
+        content = res.decode('utf-8-sig', errors='replace').strip()
+        if not content:
+            return {}
+        baselines = {}
+        for line in content.split('\n'):
+            clean = line.lstrip('﻿​‌‍ ').strip()
+            parts = clean.split(',')
+            if len(parts) != 6:
+                continue
+            try:
+                ticker, date_str, score, rsi, price, vwap_pct = parts
+                baselines[ticker.strip()] = {
+                    "date": re.sub(r'[^\d\-]', '', date_str),
+                    "score": float(score), "rsi": float(rsi),
+                    "price": float(price), "vwap_pct": float(vwap_pct),
+                }
+            except ValueError:
+                continue
+        return baselines
+    except Exception as e:
+        log_event("WARN", "get_exit_baselines", "read failed - returning empty", error=str(e)[:120])
+        return {}
+
+
+def upsert_exit_baselines(service, baselines):
+    """
+    כותב את כל מפת הבייסליינים בחזרה ל-Drive (overwrite מלא — קובץ קטן,
+    לכל היותר טיקר אחד לכל יום, אין צורך בהיסטוריה מצטברת כמו ב-Signal
+    History). נקרא רק כשהמפה השתנתה בפועל באותה ריצה.
+    """
+    if service is None or not EXIT_BASELINE_FILE_ID or "PASTE_YOUR" in EXIT_BASELINE_FILE_ID:
+        return
+    try:
+        lines = [
+            f"{t},{b['date']},{b['score']},{b['rsi']},{b['price']},{b['vwap_pct']}"
+            for t, b in baselines.items()
+        ]
+        content = '\n'.join(lines)
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        service.files().update(fileId=EXIT_BASELINE_FILE_ID, media_body=media).execute()
+    except Exception as e:
+        log_event("WARN", "upsert_exit_baselines", "write failed - baseline not updated", error=str(e)[:120])
+
+
+def track_exit_deterioration(ticker, signal, score, metrics, baselines, today_str):
+    """
+    לא סופר ריצות — משווה את הקריאה העדכנית לבייסליין (הרגע שבו המניה
+    סומנה EXIT RISK/CAUTION לראשונה היום) על בסיס האינדיקטורים עצמם.
+
+    מחזיר: (is_confirmed, baseline_changed, baselines)
+      is_confirmed=True  -> ההתדרדרות נמשכת בפועל (לא התאוששה)
+      is_confirmed=False -> קריאה ראשונה היום (אין עדיין בסיס להשוואה),
+                             או שהאינדיקטורים מראים סימני התאוששות —
+                             בדיוק תבנית ה-oversold bounce שה-backtest חשף
+    """
+    existing = baselines.get(ticker)
+    is_today = existing is not None and existing.get("date") == today_str
+
+    if signal not in ("🔴 EXIT RISK", "🟠 CAUTION"):
+        if ticker in baselines:  # התאוששות מלאה ל-OK -> מנקים בייסליין
+            del baselines[ticker]
+            return False, True, baselines
+        return False, False, baselines
+
+    if not is_today:
+        baselines[ticker] = {
+            "date": today_str, "score": float(score), "rsi": float(metrics["rsi"]),
+            "price": float(metrics["curr_p"]), "vwap_pct": float(metrics["vwap_pct"]),
+        }
+        return False, True, baselines
+
+    rsi_recovering = metrics["rsi"] > existing["rsi"] + RSI_RECOVERY_TOLERANCE
+    price_recovering = metrics["curr_p"] > existing["price"] * (1 + RECOVERY_TOLERANCE_PCT / 100)
+    vwap_recovering = metrics["vwap_pct"] > existing["vwap_pct"] + RECOVERY_TOLERANCE_PCT
+    score_dropping = score < existing["score"]
+    recovering_signs = sum([rsi_recovering, price_recovering, vwap_recovering])
+
+    if recovering_signs >= 2 or (recovering_signs >= 1 and score_dropping):
+        return False, False, baselines  # תבנית bounce -> לא מאושר
+
+    if score >= existing["score"]:  # עדכון הבייסליין לנקודה הגרועה ביותר עד כה
+        baselines[ticker] = {
+            "date": today_str, "score": float(score), "rsi": float(metrics["rsi"]),
+            "price": float(metrics["curr_p"]), "vwap_pct": float(metrics["vwap_pct"]),
+        }
+        return True, True, baselines
+    return True, False, baselines
+
+
+def get_early_weakness_alerts(watchlist, service=None):
     if not watchlist:
         return ""
     try:
@@ -1096,6 +1229,14 @@ def get_early_weakness_alerts(watchlist):
         log_event("ERROR", "get_early_weakness_alerts", "spy baseline failed", error=str(e)[:160])
         spy_day_chg = 0.0
 
+    try:
+        from datetime import datetime as _dt5
+        today_str = _dt5.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
+    except Exception:
+        today_str = _dt5.now().strftime('%Y-%m-%d')
+    baselines = get_exit_baselines(service) if service is not None else {}
+    baselines_dirty = False
+
     alerts = []
     for t in watchlist.keys():
         try:
@@ -1106,7 +1247,14 @@ def get_early_weakness_alerts(watchlist):
             # exit_risk_signal (לא confidence_signal) — זה ציון ייעודי
             # לזיהוי היחלשות של פוזיציה מוחזקת, לא לדירוג מועמד-קנייה חדש.
             # ראו את התיעוד המלא בהגדרת exit_risk_signal.
-            metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg, require_min_weekly_change=False)
+            #
+            # 🔧 (26/09/2026, סבב שני) — suppress_for_earnings=False: מניה
+            # מוחזקת שקרובה לדו"ח **ומתדרדרת** לא אמורה להיעלם מהבדיקה
+            # (זו הייתה בדיוק אותה תבנית באג כמו wk_chg<5). קרבה לדו"ח היא
+            # סיכון *נוסף* על ההיחלשות, לא סיבה להשתיק אותה - ראו earnings_near.
+            metrics, drop_reason = compute_intraday_metrics(
+                t, spy_day_chg=spy_day_chg, require_min_weekly_change=False, suppress_for_earnings=False,
+            )
             if metrics is None:
                 log_event("INFO", "get_early_weakness_alerts", "skipped", ticker=t, reason=drop_reason)
                 continue
@@ -1116,13 +1264,33 @@ def get_early_weakness_alerts(watchlist):
                 metrics["dist_52w_high"],
             )
             if signal in ("🔴 EXIT RISK", "🟠 CAUTION"):
+                is_confirmed, changed, baselines = track_exit_deterioration(
+                    t, signal, sig_score, metrics, baselines, today_str,
+                )
+                baselines_dirty = baselines_dirty or changed
+                status_tag = (
+                    "🔴🔴 מאושר — ההתדרדרות נמשכת (לא הראתה סימני התאוששות מאז שסומנה)"
+                    if is_confirmed else
+                    "⏳ ראשוני — עדיין ייתכן היפוך/התאוששות, לבדוק שוב בריצה הבאה"
+                )
+                earnings_note = " | ⚠️ דו\"ח קרוב (≤5 ימי מסחר) — סיכון מוגבר" if metrics.get("earnings_near") else ""
                 alerts.append(
-                    f"⚠️ {t}: {signal} (ציון {sig_score}) — {', '.join(reasons)}\n"
+                    f"⚠️ {t}: {signal} (ציון {sig_score}) — {', '.join(reasons)}{earnings_note}\n"
+                    f"    {status_tag}\n"
                     f"    RS(vsSPY)={metrics['rs']:+.1f} | RVol={metrics['rvol']:.1f}x | Day%={metrics['day_chg']:+.1f}% | Wk%={metrics['wk_chg']:+.1f}%\n"
                     f"    RSI={metrics['rsi']:.0f} | VWAP%={metrics['vwap_pct']:+.1f}% | מעל MA200={'כן' if metrics['above_ma200'] else 'לא'}"
                 )
+            else:
+                # החזרה ל-OK -> מנקים בייסליין אם היה קיים (התאוששות מלאה)
+                _, changed, baselines = track_exit_deterioration(
+                    t, signal, sig_score, metrics, baselines, today_str,
+                )
+                baselines_dirty = baselines_dirty or changed
         except Exception as e:
             log_event("ERROR", "get_early_weakness_alerts", "check failed", ticker=t, error=str(e)[:160])
+
+    if baselines_dirty and service is not None:
+        upsert_exit_baselines(service, baselines)
 
     if not alerts:
         return ""
@@ -1132,7 +1300,8 @@ def get_early_weakness_alerts(watchlist):
         + "\n".join(alerts) + "\n"
         "------------------------------------------------\n"
         "👉 אלו לא Stop Loss שנחצה - אלו סימני היחלשות אמיתית (RS/נפח/מגמה) "
-        "שהמחיר עדיין לא בהכרח שיקף. שווה לשקול יציאה מוקדמת ולא לחכות שה-SL יופעל.\n"
+        "שהמחיר עדיין לא בהכרח שיקף. 🔴🔴 מאושר = ראוי לתשומת לב מיידית. "
+        "⏳ ראשוני = שווה לעקוב, אך ייתכן שזו קפיצה זמנית (ראו ממצא ה-backtest).\n"
     )
 
 
@@ -1399,14 +1568,24 @@ def is_earnings_trap_radar(ticker, safe_mode=False):
         return safe_mode
 
 
-def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=True):
+def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=True, suppress_for_earnings=True):
     drop_reason = None
 
     # ── Earnings Trap Guard (חדש, 31/07/2026) ──────────────────────
     # אותו חלון 5 ימי-מסחר נגללים שכבר אושר ל-Golden_Plan. מניה שעומדת
     # לדווח בקרוב לא אמורה להיכנס לרדאר היומי כמועמדת "פריצה הבאה" —
     # בדיוק אותו סיכון (BJRI/CROX) שכבר טיפלנו בו בצד השני של המערכת.
-    if is_earnings_trap_radar(ticker):
+    #
+    # 🔧 (26/09/2026) — נמצא תוך כדי בדיקה יזומה (המשתמש שאל "יש עוד מה
+    # לבדוק?"): השער הזה, בדיוק כמו wk_chg<5 שתוקן קודם, נכון למועמד-רדאר
+    # חדש (לא נכון להיכנס למניה שעומדת לדווח - מונע גם התלהבות ממדד
+    # שהוא בעצם רק ציפייה לדוחות) אבל **שגוי** למניה מוחזקת: אם AMP הייתה
+    # קרובה לדו"ח וגם מתדרדרת, השער הזה היה מדלג עליה **לגמרי** - בדיוק
+    # אותה תבנית באג. למניה מוחזקת, קרבה לדו"ח היא סיכון *נוסף*, לא סיבה
+    # להחשיך. תוקן: suppress_for_earnings=True נשאר ברירת המחדל (משפיע רק
+    # על run_execution_scan, ההיגיון שם עדיין נכון), get_early_weakness_alerts
+    # מעביר False ומוסיף את הקרבה לדו"ח כהערה בטקסט ההתראה, לא כחסימה.
+    if suppress_for_earnings and is_earnings_trap_radar(ticker):
         return None, "earnings_trap_5d"
     session_df = get_latest_rth_session(ticker, period="5d")
     close_s = extract_col(session_df, "Close")
@@ -1491,6 +1670,12 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=
     vwap_pct = calc_pct_change(curr_p, vwap) if vwap > 0 else 0.0
     rsi = calc_intraday_rsi(close_s)
 
+    # אם suppress_for_earnings=True והגענו לכאן, is_earnings_trap_radar כבר
+    # נבדק למעלה והחזיר False (אחרת היינו עושים return מוקדם) - אין צורך
+    # לבדוק שוב ולחסוך קריאת רשת. אם False, עדיין לא נבדק - בודקים כאן,
+    # רק כדי לצרף כמידע (לא כדי לחסום).
+    earnings_near = False if suppress_for_earnings else is_earnings_trap_radar(ticker)
+
     return {
         "curr_p": curr_p,
         "day_chg": day_chg,
@@ -1499,6 +1684,7 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=
         "rs": rs,
         "vwap_pct": vwap_pct,
         "rsi": rsi,
+        "earnings_near": earnings_near,
         "above_ma200": above_ma200,
         "dist_ma200": dist_ma200,
         "dist_52w_high": dist_52w_high,
@@ -1647,7 +1833,7 @@ def main():
         log_event("ERROR", "main", "get_market_regime failed", error=str(e)[:160])
 
     try:
-        early_alerts = get_early_weakness_alerts(watchlist)
+        early_alerts = get_early_weakness_alerts(watchlist, service=service)
     except Exception as e:
         early_alerts = ""
         log_event("ERROR", "main", "get_early_weakness_alerts failed", error=str(e)[:160])
