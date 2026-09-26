@@ -580,7 +580,18 @@ def log_to_drive(service, message):
         entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
         # ה-ID המדויק של הקובץ שיצרת
-        FILE_ID = '1H0XnJrj7mwQK_7dLtCFw6wxWMK61IchobvPFP4c-xlI'  # 🔧 עודכן 30/07/2026 — מסמך חדש, הישן היה בלתי-נגיש
+        # 🔧 תוקן 26/09/2026 — ממצא שורש-הבעיה: ה-FILE_ID הישן
+        # (1H0XnJrj7mwQK_7dLtCFw6wxWMK61IchobvPFP4c-xlI, מ-30/07/2026)
+        # מתייחס למסמך שאינו נגיש בכלל לחשבון ה-Google האישי של המשתמש
+        # (sagi.taragan@gmail.com) - כנראה נוצר/שותף רק מול ה-service
+        # account. הקוד כתב אליו בהצלחה כל הזמן (זו הסיבה שההרצות דיווחו
+        # "[CONFIRM] הצליח") - אבל לתוך מסמך שהמשתמש מעולם לא ראה. בינתיים
+        # המשתמש פתח/יצר מסמך אחר בשם "Daily Log" (בתיקיית TELEGRAM WEB)
+        # וזה שנשאר ריק. אומת ישירות מול Drive: המסמך הבא כבר משותף
+        # ל-service account (sentinel-handler@project-c833aec6-507e-4e48-bb7
+        # .iam.gserviceaccount.com) בהרשאת writer - כך שאין צורך בשום שיתוף
+        # נוסף, רק בעדכון ה-ID הזה.
+        FILE_ID = '1FZfO8R6OaklSsDb0fTQV-f-MpnP1mxIdsCC_ciXFycw'  # "Daily Log" האמיתי שהמשתמש רואה
 
         # משיכת התוכן הקיים מהקובץ
         res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
