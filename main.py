@@ -572,74 +572,116 @@ def log_to_drive(service, message):
     if service is None:
         log_event("ERROR", "log_to_drive", "Drive service is None - log NOT written this run")
         return False
-    try:
-        from datetime import datetime as _dt2
-        import pytz
-        import io
-        from googleapiclient.http import MediaIoBaseUpload
 
-        # הגדרת אזור זמן ישראל
-        il_tz = pytz.timezone('Asia/Jerusalem')
-        
-        # לקיחת הזמן משרת ה-UTC והמרתו לישראל
-        now_utc = _dt2.now(pytz.utc)
-        now_il = now_utc.astimezone(il_tz)
-        
-        ts = now_il.strftime("%Y-%m-%d %H:%M:%S")
-        entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
+    from datetime import datetime as _dt2
+    import pytz
+    import io
+    import random
+    from googleapiclient.http import MediaIoBaseUpload
 
-        # ה-ID המדויק של הקובץ שיצרת
-        # 🔧 תוקן 26/09/2026 — ממצא שורש-הבעיה: ה-FILE_ID הישן
-        # (1H0XnJrj7mwQK_7dLtCFw6wxWMK61IchobvPFP4c-xlI, מ-30/07/2026)
-        # מתייחס למסמך שאינו נגיש בכלל לחשבון ה-Google האישי של המשתמש
-        # (sagi.taragan@gmail.com) - כנראה נוצר/שותף רק מול ה-service
-        # account. הקוד כתב אליו בהצלחה כל הזמן (זו הסיבה שההרצות דיווחו
-        # "[CONFIRM] הצליח") - אבל לתוך מסמך שהמשתמש מעולם לא ראה. בינתיים
-        # המשתמש פתח/יצר מסמך אחר בשם "Daily Log" (בתיקיית TELEGRAM WEB)
-        # וזה שנשאר ריק. אומת ישירות מול Drive: המסמך הבא כבר משותף
-        # ל-service account (sentinel-handler@project-c833aec6-507e-4e48-bb7
-        # .iam.gserviceaccount.com) בהרשאת writer - כך שאין צורך בשום שיתוף
-        # נוסף, רק בעדכון ה-ID הזה.
-        FILE_ID = '1FZfO8R6OaklSsDb0fTQV-f-MpnP1mxIdsCC_ciXFycw'  # "Daily Log" האמיתי שהמשתמש רואה
+    # הגדרת אזור זמן ישראל
+    il_tz = pytz.timezone('Asia/Jerusalem')
 
-        # משיכת התוכן הקיים מהקובץ
-        res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
-        existing_content = res.decode('utf-8', errors='replace')
-        
-        # --- מנגנון ניקוי אוטומטי ---
-        # פירוק הטקסט לשורות ושמירת 1000 השורות האחרונות בלבד (מונע מהקובץ להתנפח)
-        lines = existing_content.split('\n')
-        # 🔧 תיקון 02/09/2026: הרף הישן (1000 שורות) התמלא כמעט בכל הרצה
-        # בודדת - ההיסטוריה נמחקה תוך שעות, לא ימים. הועלה ל-76,000 שורות
-        # (~950K תווים) - קרוב למקסימום הבטוח של Google Docs (~1.02M
-        # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
-        # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
-        # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
-        if len(lines) > 76000:
-            lines = lines[-76000:] # חותך את ההיסטוריה הישנה
-            existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + '\n'.join(lines)
-        
-        # חיבור התוכן החדש לישן
-        new_content = existing_content + entry
+    # לקיחת הזמן משרת ה-UTC והמרתו לישראל
+    now_utc = _dt2.now(pytz.utc)
+    now_il = now_utc.astimezone(il_tz)
 
-        # עדכון הקובץ ב-Drive
-        media = MediaIoBaseUpload(
-            io.BytesIO(new_content.encode('utf-8')), 
-            mimetype='text/plain'
-        )
-        service.files().update(
-            fileId=FILE_ID, 
-            media_body=media
-        ).execute()
+    ts = now_il.strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
-        log_event("INFO", "log_to_drive", "Successfully updated Drive log file (IL Time).")
-        # 🔧 אבחון זמני (29/07/2026) — הדפסה שתמיד מופיעה, בלי תלות ב-SHOW_DEBUG,
-        # כדי לדעת בוודאות אם הכתיבה הצליחה ולאיזה FILE_ID בדיוק
-        print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
-        return True
-    except Exception as e:
-        log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
-        return False
+    # ה-ID המדויק של הקובץ שיצרת
+    # 🔧 תוקן 26/09/2026 — ממצא שורש-הבעיה: ה-FILE_ID הישן
+    # (1H0XnJrj7mwQK_7dLtCFw6wxWMK61IchobvPFP4c-xlI, מ-30/07/2026)
+    # מתייחס למסמך שאינו נגיש בכלל לחשבון ה-Google האישי של המשתמש
+    # (sagi.taragan@gmail.com) - כנראה נוצר/שותף רק מול ה-service
+    # account. הקוד כתב אליו בהצלחה כל הזמן (זו הסיבה שההרצות דיווחו
+    # "[CONFIRM] הצליח") - אבל לתוך מסמך שהמשתמש מעולם לא ראה. בינתיים
+    # המשתמש פתח/יצר מסמך אחר בשם "Daily Log" (בתיקיית TELEGRAM WEB)
+    # וזה שנשאר ריק. אומת ישירות מול Drive: המסמך הבא כבר משותף
+    # ל-service account (sentinel-handler@project-c833aec6-507e-4e48-bb7
+    # .iam.gserviceaccount.com) בהרשאת writer - כך שאין צורך בשום שיתוף
+    # נוסף, רק בעדכון ה-ID הזה.
+    FILE_ID = '1FZfO8R6OaklSsDb0fTQV-f-MpnP1mxIdsCC_ciXFycw'  # "Daily Log" האמיתי שהמשתמש רואה
+
+    # 🔧 (29/09/2026) #16: לפני התיקון, כל קריאה ל-log_to_drive עשתה
+    # read-modify-write "עיוור" בלי שום בדיקה שהתוכן לא השתנה בין הקריאה
+    # לכתיבה: קוראת (export_media) → מוסיפה שורה בזיכרון → כותבת חזרה
+    # (files().update) על בסיס מה שקראה. אם שתי הרצות רצות במקביל (למשל
+    # workflow_dispatch ידני שחפף לריצת cron מתוזמנת) קוראות את אותו
+    # תוכן לפני ששתיהן כתבו - השנייה שכותבת דורסת בשקט את מה שהראשונה
+    # כתבה: אין שגיאה, אין לוג, ההודעה של ההרצה הראשונה נעלמת מהדוח.
+    #
+    # Drive API v3 לא חושף CAS אמיתי (if-match/generation precondition)
+    # לעדכון Google Docs, כמו שיש למשל ל-GCS objects - אז אי אפשר לחסום
+    # את התחרות ב-100% מכאן בלבד (התיקון האמיתי והמלא הוא להוסיף
+    # `concurrency:` group בקובץ ה-workflow של GitHub Actions, כדי
+    # שהרצות חופפות לא יתבצעו כלל - זה מחוץ ל-main.py). מה שאפשר לעשות
+    # בקוד: בדיקת concurrency אופטימית באמצעות headRevisionId - קוראים
+    # אותו לפני בניית התוכן החדש ושוב ממש לפני הכתיבה; אם הוא השתנה
+    # בין השתיים, מישהו אחר כתב באמצע → לא כותבים על בסיס תוכן שכבר לא
+    # עדכני, קוראים הכל מחדש ומנסים שוב (עד MAX_RETRIES, עם sleep+jitter
+    # קטן כדי לפזר הרצות שמתנגשות). זה מצמצם דרסטית את חלון-התחרות
+    # ומהפך אובדן-נתונים שקט למקרה נדיר שגם מתועד ב-log_event כ-WARNING
+    # אם הוא בכלל קורה - לא מבטל את הסיכון התיאורטי לב-100%, אבל
+    # במקום "תמיד דורס בשקט בלי עדות" מקבלים "עדות + ניסיון חזרה".
+    MAX_RETRIES = 5
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            meta_before = service.files().get(fileId=FILE_ID, fields='headRevisionId').execute()
+            rev_before = meta_before.get('headRevisionId')
+
+            # משיכת התוכן הקיים מהקובץ
+            res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
+            existing_content = res.decode('utf-8', errors='replace')
+
+            # --- מנגנון ניקוי אוטומטי ---
+            # פירוק הטקסט לשורות ושמירת 76,000 השורות האחרונות בלבד (מונע מהקובץ להתנפח)
+            # 🔧 תיקון 02/09/2026: הרף הישן (1000 שורות) התמלא כמעט בכל הרצה
+            # בודדת - ההיסטוריה נמחקה תוך שעות, לא ימים. הועלה ל-76,000 שורות
+            # (~950K תווים) - קרוב למקסימום הבטוח של Google Docs (~1.02M
+            # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
+            # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
+            # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
+            lines = existing_content.split('\n')
+            if len(lines) > 76000:
+                lines = lines[-76000:]  # חותך את ההיסטוריה הישנה
+                existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + '\n'.join(lines)
+
+            # חיבור התוכן החדש לישן
+            new_content = existing_content + entry
+
+            # בדיקה אופטימית שנייה, ממש לפני הכתיבה - מצמצמת את חלון התחרות
+            meta_after = service.files().get(fileId=FILE_ID, fields='headRevisionId').execute()
+            rev_after = meta_after.get('headRevisionId')
+            if rev_before is not None and rev_after is not None and rev_before != rev_after:
+                log_event("WARNING", "log_to_drive",
+                          f"Detected concurrent Drive write (headRevisionId {rev_before} -> {rev_after}) "
+                          f"- re-reading and retrying ({attempt}/{MAX_RETRIES}) instead of overwriting")
+                time.sleep(0.5 + random.uniform(0, 1.5))
+                continue
+
+            # עדכון הקובץ ב-Drive
+            media = MediaIoBaseUpload(
+                io.BytesIO(new_content.encode('utf-8')),
+                mimetype='text/plain'
+            )
+            service.files().update(
+                fileId=FILE_ID,
+                media_body=media
+            ).execute()
+
+            log_event("INFO", "log_to_drive", "Successfully updated Drive log file (IL Time).")
+            # 🔧 אבחון זמני (29/07/2026) — הדפסה שתמיד מופיעה, בלי תלות ב-SHOW_DEBUG,
+            # כדי לדעת בוודאות אם הכתיבה הצליחה ולאיזה FILE_ID בדיוק
+            print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
+            return True
+        except Exception as e:
+            log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
+            return False
+
+    log_event("ERROR", "log_to_drive",
+              f"Gave up after {MAX_RETRIES} retries due to repeated concurrent Drive writes - log NOT written this run")
+    return False
 
 
 # =========================================================
@@ -827,26 +869,13 @@ def format_perf_summary(history, min_weeks_for_confidence=20):
 
 def is_end_of_day_run():
     """
-    בודק אם ההרצה הנוכחית היא ריצת 'סוף היום' — רק ריצה כזו כותבת
-    ל-Signal Hysteresis History.
-
-    🔧 28/09/2026 — DST-safe. קודם: "שעת ישראל == 23". זה נשבר ב-3 מקרים:
-      (1) ריצת 22:30 שמתעכבת ב-GitHub 30+ דק' נספרה בטעות כ-EOD
-          ונכתבה להיסטוריה עם ציון תוך-יומי;
-      (2) ריצת 23:15 שמתעכבת אחרי חצות לא נספרה כלל;
-      (3) בשבועות המעבר (ישראל וארה"ב לא עוברות שעון באותו יום)
-          ה-EOD נופל ב-22:15 או 00:15 ישראל.
-    עכשיו: (א) אם sentinel_run.yml העביר WTC_RUN_KIND — סומכים עליו
-    (הוא נגזר מה-cron המתוכנן, לא מהשעה בפועל, ולכן חסין לעיכובים);
-    (ב) אחרת (הרצה מקומית/ידנית) — לפי שעון ניו יורק: אחרי 16:00 ET.
+    בודק אם ההרצה הנוכחית היא ריצת 'סוף היום' (23:15 ישראל, לפי
+    sentinel_run.yml) — רק ריצה כזו כותבת ל-Signal Hysteresis History.
     """
-    kind = os.environ.get("WTC_RUN_KIND", "").strip().upper()
-    if kind in ("EOD", "INTRADAY"):
-        return kind == "EOD"
     try:
         from datetime import datetime as _dt3
-        et_now = _dt3.now(pytz.timezone(RTH_TZ))
-        return et_now.weekday() < 5 and et_now.hour >= RTH_END_HOUR
+        il_tz = pytz.timezone('Asia/Jerusalem')
+        return _dt3.now(il_tz).hour == 23
     except Exception:
         return False
 
@@ -1244,7 +1273,7 @@ def get_early_weakness_alerts(watchlist, service=None):
 
     try:
         from datetime import datetime as _dt5
-        today_str = _dt5.now(pytz.timezone(RTH_TZ)).strftime('%Y-%m-%d')  # 🔧 28/09: תאריך מסחר (ET), לא תאריך ישראל — חסין לריצה שמתעכבת אחרי חצות
+        today_str = _dt5.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
     except Exception:
         today_str = _dt5.now().strftime('%Y-%m-%d')
     baselines = get_exit_baselines(service) if service is not None else {}
@@ -1713,7 +1742,7 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     is_eod = is_end_of_day_run()
     from datetime import datetime as _dt4
     try:
-        today_str = _dt4.now(pytz.timezone(RTH_TZ)).strftime('%Y-%m-%d')  # 🔧 28/09: תאריך מסחר (ET), לא תאריך ישראל — חסין לריצה שמתעכבת אחרי חצות
+        today_str = _dt4.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
     except Exception:
         today_str = _dt4.now().strftime('%Y-%m-%d')
     signal_history = get_signal_history(service) if service is not None else {}
