@@ -869,13 +869,29 @@ def format_perf_summary(history, min_weeks_for_confidence=20):
 
 def is_end_of_day_run():
     """
-    בודק אם ההרצה הנוכחית היא ריצת 'סוף היום' (23:15 ישראל, לפי
-    sentinel_run.yml) — רק ריצה כזו כותבת ל-Signal Hysteresis History.
+    בודק אם ההרצה הנוכחית היא ריצת 'סוף היום' (16:15 ET — כ-23:15 ישראל
+    ברוב השנה, לפי sentinel_run.yml + market_gate.py) — רק ריצה כזו
+    כותבת ל-Signal Hysteresis History.
+
+    🔧 (29/09/2026, NEW2 — ראו wtc-monday-timetable.md) — הגרסה הקודמת
+    בדקה רק "שעת ישראל == 23" (hour בלבד, בלי דקות). ממצאים: ריצה
+    שהתעכבה 30+ דקות (22:30 בפועל, GitHub Actions לפעמים מעכב בעומס)
+    לא נספרה כ-EOD בזמן; ריצה שהתעכבה אחרי חצות לא נספרה בכלל; בשבועות
+    שבהם ישראל וארה"ב עוברות שעון בתאריכים שונים ה-EOD בפועל נופל
+    ב-22:15, לא ב-23:xx. עכשיו: מסתמכת קודם כל על WTC_RUN_KIND
+    (env var) — מגיע מ-market_gate.py דרך sentinel_run.yml, שכבר עשה
+    את כל חשבון ה-DST הנכון לפי שעון ניו יורק (הזמן *המתוכנן* של
+    הטריגר, לא זמן-ריצה בפועל, כך שעיכוב לא משנה את הסיווג). אם
+    המשתנה חסר או לא מזוהה (למשל הרצה ישנה/ידנית לפני חיבור ה-workflow
+    לגייט) — נופלת לגיבוי המתועד: שעון ניו יורק >= 16:00.
     """
+    run_kind = os.environ.get('WTC_RUN_KIND', '').strip().upper()
+    if run_kind in ('EOD', 'INTRADAY'):
+        return run_kind == 'EOD'
     try:
-        from datetime import datetime as _dt3
-        il_tz = pytz.timezone('Asia/Jerusalem')
-        return _dt3.now(il_tz).hour == 23
+        from datetime import datetime as _dt3, time as _dtime3
+        ny_tz = pytz.timezone('America/New_York')
+        return _dt3.now(ny_tz).time() >= _dtime3(16, 0)
     except Exception:
         return False
 
@@ -1271,9 +1287,14 @@ def get_early_weakness_alerts(watchlist, service=None):
         log_event("ERROR", "get_early_weakness_alerts", "spy baseline failed", error=str(e)[:160])
         spy_day_chg = 0.0
 
+    # 🔧 (29/09/2026, NEW2) — היה תאריך ישראל (Asia/Jerusalem); הוחלף
+    # לתאריך-מסחר ET, כדי שיישאר עקבי עם is_end_of_day_run() (שגם היא
+    # עברה ל-ET) ועם המפתח שנשמר ב-Exit Baselines - אחרת ריצה סמוך
+    # לחצות ישראל (שכבר "יום מסחר הבא" בישראל, אבל עדיין אותו יום
+    # מסחר ב-NYSE) הייתה יוצרת baseline כפול/לא-עקבי לאותו יום מסחר.
     try:
         from datetime import datetime as _dt5
-        today_str = _dt5.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
+        today_str = _dt5.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     except Exception:
         today_str = _dt5.now().strftime('%Y-%m-%d')
     baselines = get_exit_baselines(service) if service is not None else {}
@@ -1740,9 +1761,12 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
 
     # ✅ Hysteresis (29/07/2026) — נטען פעם אחת לכל הריצה, לא לכל מניה בנפרד
     is_eod = is_end_of_day_run()
+    # 🔧 (29/09/2026, NEW2) — היה תאריך ישראל; הוחלף לתאריך-מסחר ET, ראו
+    # הערה מפורטת ב-run_.. הזהה למעלה (get_early_weakness_alerts) - אותו
+    # רציונל: עקביות עם is_end_of_day_run() ועם המפתח ב-Signal History.
     from datetime import datetime as _dt4
     try:
-        today_str = _dt4.now(pytz.timezone('Asia/Jerusalem')).strftime('%Y-%m-%d')
+        today_str = _dt4.now(pytz.timezone('America/New_York')).strftime('%Y-%m-%d')
     except Exception:
         today_str = _dt4.now().strftime('%Y-%m-%d')
     signal_history = get_signal_history(service) if service is not None else {}
