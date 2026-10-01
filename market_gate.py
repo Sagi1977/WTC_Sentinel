@@ -103,14 +103,18 @@ def _session_close(d: date):
 
 
 def _intended_utc_from_cron(cron: str, now: datetime) -> datetime:
-    """'30 13 * * 1-5' → הזמן המתוכנן ב-UTC (היום, או אתמול אם עוד לא הגיע)."""
+    """'33 9 * * 1-5' → הזמן המתוכנן ב-UTC (היום, או אתמול אם עוד לא הגיע).
+    🔧 01/10/2026: שעת ה-cron מתפרשת באזור-הזמן שב-WTC_CRON_TZ (ברירת מחדל UTC).
+    sentinel_run.yml מגדיר עכשיו timezone: America/New_York על כל שורה."""
     minute, hour = cron.split()[:2]
     if not (minute.isdigit() and hour.isdigit()):
         raise ValueError(f"cron must be a single fixed time, got: {cron!r}")
-    t = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-    if t > now + timedelta(minutes=1):     # עיכוב שחצה חצות UTC
+    tz = ZoneInfo(os.environ.get("WTC_CRON_TZ", "UTC") or "UTC")
+    local_now = now.astimezone(tz)
+    t = local_now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    if t > local_now + timedelta(minutes=1):   # עיכוב שחצה חצות
         t -= timedelta(days=1)
-    return t
+    return t.astimezone(timezone.utc)
 
 
 def main():
