@@ -1,49 +1,44 @@
 name: WTC Sentinel Execution
 # NEW2 — 28/09/2026: DST-safe + יום שני + חגי NYSE
+# 🔧 01/10/2026 — תיקון: ב-29/09 וב-30/09 אף ריצה מתוזמנת לא הגיעה ל-main.py
+#   (נבדק מול ה-Daily Log — רק ריצות ידניות נכתבו). שלושה שינויים:
+#   1. השומר (gate) עבר ל-job נפרד, *מחוץ* לתור ה-concurrency. קודם כל 19
+#      הטריגרים (כולל 6 של "הגרסה השנייה" שרק מדלגים) עמדו באותו תור,
+#      ו-GitHub שומר בתור רק ריצה ממתינה אחת — כל טריגר חדש *מבטל* את
+#      הממתין הקודם, כולל ריצה אמיתית שבוטלה ע"י טריגר-דמה. עכשיו רק ריצות
+#      שהשומר אישר נכנסות לתור.
+#   2. העיכוב הנמדד הוא עכשיו עיכוב GitHub בלבד, לא זמן-המתנה בתור.
+#   3. שורות ה-cron זזו 3 דקות אחרי הסלוט (:33/:03/:48/:18) — GitHub מעכב
+#      במיוחד טריגרים בדיוק ב-:00/:30. market_gate.py משייך כל טריגר לסלוט
+#      שלפניו (סבילות 0–14 דק').
 #
-# איך זה עובד:
-#   GitHub מבין cron רק ב-UTC, ושוק ניו יורק זז שעה ב-UTC פעמיים בשנה.
-#   לכן יש כאן cron לשתי הגרסאות (EDT = קיץ ארה"ב, EST = חורף ארה"ב),
-#   ו-market_gate.py ממיר כל טריגר לשעון ניו יורק ומריץ רק את הסלוטים
-#   האמיתיים (09:30, 09:45, 10:00, כל 30 דק' עד 15:30, ו-16:15 EOD).
-#   הטריגרים של הגרסה ה"לא נכונה" מדלגים תוך שניות, בלי להריץ את main.py.
-#   => אין צורך לערוך את הקובץ במעברי שעון, לא בארה"ב ולא בישראל.
+# בשעון ישראל (רוב השנה): 16:33, 16:48, 17:03, 17:33 ... 22:33, ו-23:18 (EOD).
+# בשבועות המעבר (25/10–31/10 וכו') הכל שעה מוקדם יותר — וזה נכון, נצמד לשוק.
 #
-# בשעון ישראל (רוב השנה): 16:30, 16:45, 17:00, 17:30 ... 22:30, ו-23:15.
-# בשבועות המעבר (ישראל וארה"ב לא עוברות באותו יום) השעות בישראל זזות
-# בשעה — וזה נכון, כי הן נצמדות לשוק ולא לשעון בישראל.
-#
-# ⚠️ כל שורת cron חייבת להיות שעה אחת בודדת (בלי "0,30") —
-#    market_gate.py מזהה ממנה את הזמן המתוכנן, כך שעיכוב של GitHub
-#    לא משנה את סוג הריצה (INTRADAY/EOD).
-
-# 🔧 09/08/2026: ריצות לא חופפות — אחת מחכה לשנייה (Daily Log).
-concurrency:
-  group: wtc-sentinel-single-run
-  cancel-in-progress: false
+# ⚠️ כל שורת cron חייבת להיות שעה אחת בודדת (בלי "3,33").
 
 on:
   schedule:
     # ───── UTC ─────  EDT (קיץ ארה"ב, UTC-4)   EST (חורף ארה"ב, UTC-5)
-    - cron: '30 13 * * 1-5'   # 09:30 ET פתיחה           —
-    - cron: '45 13 * * 1-5'   # 09:45                    —
-    - cron: '0 14 * * 1-5'    # 10:00                    —
-    - cron: '30 14 * * 1-5'   # 10:30                    09:30 ET פתיחה
-    - cron: '45 14 * * 1-5'   # —                        09:45
-    - cron: '0 15 * * 1-5'    # 11:00                    10:00
-    - cron: '30 15 * * 1-5'   # 11:30                    10:30
-    - cron: '0 16 * * 1-5'    # 12:00                    11:00
-    - cron: '30 16 * * 1-5'   # 12:30                    11:30
-    - cron: '0 17 * * 1-5'    # 13:00                    12:00
-    - cron: '30 17 * * 1-5'   # 13:30                    12:30
-    - cron: '0 18 * * 1-5'    # 14:00                    13:00
-    - cron: '30 18 * * 1-5'   # 14:30                    13:30
-    - cron: '0 19 * * 1-5'    # 15:00                    14:00
-    - cron: '30 19 * * 1-5'   # 15:30 (שעה אחרונה)       14:30
-    - cron: '0 20 * * 1-5'    # —                        15:00
-    - cron: '15 20 * * 1-5'   # 16:15 EOD + Golden Filter  —
-    - cron: '30 20 * * 1-5'   # —                        15:30 (שעה אחרונה)
-    - cron: '15 21 * * 1-5'   # —                        16:15 EOD + Golden Filter
+    - cron: '33 13 * * 1-5'   # 09:30 ET פתיחה           —
+    - cron: '48 13 * * 1-5'   # 09:45                    —
+    - cron: '3 14 * * 1-5'    # 10:00                    —
+    - cron: '33 14 * * 1-5'   # 10:30                    09:30 ET פתיחה
+    - cron: '48 14 * * 1-5'   # —                        09:45
+    - cron: '3 15 * * 1-5'    # 11:00                    10:00
+    - cron: '33 15 * * 1-5'   # 11:30                    10:30
+    - cron: '3 16 * * 1-5'    # 12:00                    11:00
+    - cron: '33 16 * * 1-5'   # 12:30                    11:30
+    - cron: '3 17 * * 1-5'    # 13:00                    12:00
+    - cron: '33 17 * * 1-5'   # 13:30                    12:30
+    - cron: '3 18 * * 1-5'    # 14:00                    13:00
+    - cron: '33 18 * * 1-5'   # 14:30                    13:30
+    - cron: '3 19 * * 1-5'    # 15:00                    14:00
+    - cron: '33 19 * * 1-5'   # 15:30 (שעה אחרונה)       14:30
+    - cron: '3 20 * * 1-5'    # —                        15:00
+    - cron: '18 20 * * 1-5'   # 16:15 EOD                —
+    - cron: '33 20 * * 1-5'   # —                        15:30 (שעה אחרונה)
+    - cron: '18 21 * * 1-5'   # —                        16:15 EOD
 
   workflow_dispatch:
     inputs:
@@ -54,9 +49,42 @@ on:
         default: auto
 
 jobs:
+  # ── שלב 1: שומר-סף — רץ מיד, בלי תור. האם זה סלוט אמיתי ויום מסחר? ──
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      kind: ${{ steps.gate.outputs.kind }}
+      slot_et: ${{ steps.gate.outputs.slot_et }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Market gate (DST / holidays / delay)
+        id: gate
+        env:
+          WTC_EVENT: ${{ github.event_name }}
+          WTC_SCHEDULE: ${{ github.event.schedule }}
+          WTC_FORCE_KIND: ${{ inputs.run_kind || 'auto' }}
+        run: |
+          pip install --quiet pandas_market_calendars || echo "⚠️ calendar install failed — gate will use fallback holiday list"
+          python market_gate.py
+
+  # ── שלב 2: הריצה עצמה — רק אם השומר אישר. רק כאן יש תור (Daily Log). ──
   run-sentinel:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: wtc-sentinel-single-run
+      cancel-in-progress: false
     permissions:
       contents: 'read'
       id-token: 'write'
@@ -70,36 +98,21 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ── שומר-סף: האם זה סלוט אמיתי ויום מסחר? (שניות ספורות) ──
-      - name: Market gate (DST / holidays / delay)
-        id: gate
-        env:
-          WTC_EVENT: ${{ github.event_name }}
-          WTC_SCHEDULE: ${{ github.event.schedule }}
-          WTC_FORCE_KIND: ${{ inputs.run_kind || 'auto' }}
-        run: |
-          pip install --quiet pandas_market_calendars || echo "⚠️ calendar install failed — gate will use fallback holiday list"
-          python market_gate.py
-
-      # ── כל השאר רץ רק אם השומר אישר ──
       - name: Authenticate to Google Cloud
-        if: steps.gate.outputs.run == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Install Dependencies
-        if: steps.gate.outputs.run == 'true'
         run: |
           pip install pandas yfinance requests google-api-python-client google-auth-httplib2 google-auth-oauthlib google-genai pytz
 
       - name: Run Sentinel Script
-        if: steps.gate.outputs.run == 'true'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WTC_RUN_KIND: ${{ steps.gate.outputs.kind }}   # INTRADAY / EOD — נקרא ב-is_end_of_day_run()
-          WTC_SLOT_ET: ${{ steps.gate.outputs.slot_et }}
+          WTC_RUN_KIND: ${{ needs.gate.outputs.kind }}   # INTRADAY / EOD — נקרא ב-is_end_of_day_run()
+          WTC_SLOT_ET: ${{ needs.gate.outputs.slot_et }}
         run: python main.py
