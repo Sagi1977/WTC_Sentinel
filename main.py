@@ -642,6 +642,15 @@ def log_to_drive(service, message):
             # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
             # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
             # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
+            # 🔧 (01/10/2026) #37 — שורש הבעיה הוכח: כל סבב export(text/plain)→
+            # update(text/plain→Google Doc) מכפיל פי 2 כל שורה ריקה קיימת. אחרי
+            # כמה ימים: 151,779 שורות, רק 242 עם טקסט. התוצאה: (1) כל כתיבה מעלה
+            # ~150K פסקאות ריקות → Google מחזיר HttpError 500; (2) חיתוך ה-76,000
+            # שורות מחק בפועל כמעט את כל ההיסטוריה (~7 ריצות נשמרו). מכווצים כל
+            # רצף של 2+ שורות ריקות לשורה ריקה אחת לפני כל כתיבה — גם מרפא את
+            # הקובץ הקיים בכתיבה הראשונה.
+            existing_content = re.sub(r'\n[ \t\u00a0\ufeff]*(?:\n[ \t\u00a0\ufeff]*)+\n', '\n\n', existing_content)
+
             lines = existing_content.split('\n')
             if len(lines) > 76000:
                 lines = lines[-76000:]  # חותך את ההיסטוריה הישנה
@@ -676,6 +685,18 @@ def log_to_drive(service, message):
             print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
             return True
         except Exception as e:
+            # 🔧 (01/10/2026) — שגיאת שרת זמנית של Google (5xx/429) מקבלת ניסיון
+            # חוזר עם המתנה, במקום כשל מיידי. שגיאה אחרת (הרשאות וכו') — כשל מיידי.
+            status = getattr(getattr(e, 'resp', None), 'status', None)
+            try:
+                status = int(status) if status is not None else None
+            except (TypeError, ValueError):
+                status = None
+            if status in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
+                log_event("WARNING", "log_to_drive",
+                          f"Drive returned HTTP {status} - retrying ({attempt}/{MAX_RETRIES})")
+                time.sleep(2 * attempt + random.uniform(0, 1.5))
+                continue
             log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
             return False
 
