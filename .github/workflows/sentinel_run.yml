@@ -7,7 +7,7 @@ name: WTC Sentinel Execution
 
 on:
   schedule:
-    - cron: '0 17-23 * * 1-5'
+    - cron: '5 17-23 * * 1-5'
       timezone: "Asia/Jerusalem"
   workflow_dispatch:
 
