@@ -40,8 +40,15 @@ INTRADAY_SLOTS_ET = ["09:30", "09:45", "10:00"] + [
 ]
 EOD_SLOT_ET = "16:15"
 
-# עיכוב מקסימלי מותר בין הזמן המתוכנן לזמן הריצה בפועל
-MAX_LAG_MIN = {"INTRADAY": 40, "EOD": 240}
+# 🔧 01/10/2026: היה 40 דק' ל-INTRADAY. בפועל GitHub מעכב טריגרים מתוזמנים
+#    לעיתים קרובות ביותר מזה — והשומר דילג עליהם בשקט, כך שלא הגיע אף דו"ח
+#    מתוזמן ב-29/09 וב-30/09. דו"ח מאוחר עדיף על אף דו"ח.
+MAX_LAG_MIN = {"INTRADAY": 120, "EOD": 240}
+
+# 🔧 01/10/2026: שורות ה-cron זזו כמה דקות אחרי הסלוט (למשל 13:33 במקום 13:30),
+#    כי GitHub מעכב במיוחד טריגרים בדיוק ב-:00/:30. טריגר משויך לסלוט אם הוא
+#    נופל 0–14 דקות אחריו.
+SLOT_TOLERANCE_MIN = 15
 
 # ── גיבוי אם pandas_market_calendars לא זמין (לוודא מול nyse.com מדי שנה) ──
 FALLBACK_HOLIDAYS = {
@@ -131,14 +138,19 @@ def main():
                     reason=f"cannot parse schedule ({e}) — running anyway")
 
     et = intended.astimezone(ET)
-    slot = et.strftime("%H:%M")
-    slot_il = intended.astimezone(IL).strftime("%H:%M")
-
-    if slot == EOD_SLOT_ET:
-        kind = "EOD"
-    elif slot in INTRADAY_SLOTS_ET:
-        kind = "INTRADAY"
-    else:
+    trig_min = et.hour * 60 + et.minute
+    kind, slot = None, et.strftime("%H:%M")
+    for name, slots in (("EOD", [EOD_SLOT_ET]), ("INTRADAY", INTRADAY_SLOTS_ET)):
+        for s_ in slots:
+            hh, mm = map(int, s_.split(":"))
+            if 0 <= trig_min - (hh * 60 + mm) < SLOT_TOLERANCE_MIN:
+                kind, slot = name, s_
+                break
+        if kind:
+            break
+    slot_il = (intended - timedelta(minutes=trig_min - int(slot[:2]) * 60 - int(slot[3:]))
+               ).astimezone(IL).strftime("%H:%M")
+    if kind is None:
         return _out(run="false", kind="-", slot_et=slot, slot_il=slot_il,
                     reason=f"cron '{cron}' = {slot} ET — belongs to the other DST variant")
 
