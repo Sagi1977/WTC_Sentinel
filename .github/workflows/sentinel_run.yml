@@ -1,91 +1,21 @@
 name: WTC Sentinel Execution
-# 🔧 01/10/2026 (ערב) — שורות ה-cron מוגדרות עכשיו ישירות בשעון ניו יורק,
-#   עם timezone: America/New_York (תמיכה מובנית של GitHub מ-03/2026).
-#   GitHub עצמו מטפל בשעון קיץ/חורף — אין יותר כפל שורות EDT/EST ו-6 שורות "דמה".
-#   15 שורות = 15 סלוטים אמיתיים בלבד.
-#
-# בשעון ישראל (רוב השנה): 16:33, 16:48, 17:03, 17:33 ... 22:33, ו-23:18 (EOD).
-# בשבועות המעבר (25/10–31/10 וכו') הכל שעה מוקדם יותר — נכון, נצמד לשוק.
-# הדקות 3/18/33/48 — לא :00/:30, שם GitHub מעכב ומשמיט הכי הרבה.
-#
-# market_gate.py עדיין רץ ראשון: חגי NYSE, ימים מקוצרים, וסוג הריצה (INTRADAY/EOD).
+# 🔧 01/10/2026 — גרסה פשוטה לבקשת המשתמש:
+#   ריצה כל שעה עגולה 17:00–23:00 שעון ישראל, שני–שישי.
+#   timezone: Asia/Jerusalem — GitHub עצמו מטפל בשעון קיץ/חורף בישראל.
+#   הריצה של 23:00 נספרת כ-EOD אוטומטית ב-main.py (שעון ניו יורק >= 16:00).
+#   בלי market_gate.py, בלי שורות כפולות.
 
 on:
   schedule:
-    - cron: '33 9 * * 1-5'     # 09:30 ET פתיחה   (16:30 ישראל)
-      timezone: "America/New_York"
-    - cron: '48 9 * * 1-5'     # 09:45
-      timezone: "America/New_York"
-    - cron: '3 10 * * 1-5'     # 10:00
-      timezone: "America/New_York"
-    - cron: '33 10 * * 1-5'    # 10:30
-      timezone: "America/New_York"
-    - cron: '3 11 * * 1-5'     # 11:00
-      timezone: "America/New_York"
-    - cron: '33 11 * * 1-5'    # 11:30
-      timezone: "America/New_York"
-    - cron: '3 12 * * 1-5'     # 12:00
-      timezone: "America/New_York"
-    - cron: '33 12 * * 1-5'    # 12:30
-      timezone: "America/New_York"
-    - cron: '3 13 * * 1-5'     # 13:00
-      timezone: "America/New_York"
-    - cron: '33 13 * * 1-5'    # 13:30
-      timezone: "America/New_York"
-    - cron: '3 14 * * 1-5'     # 14:00
-      timezone: "America/New_York"
-    - cron: '33 14 * * 1-5'    # 14:30
-      timezone: "America/New_York"
-    - cron: '3 15 * * 1-5'     # 15:00
-      timezone: "America/New_York"
-    - cron: '33 15 * * 1-5'    # 15:30 (אחרונה)  (22:30 ישראל)
-      timezone: "America/New_York"
-    - cron: '18 16 * * 1-5'    # 16:15 EOD        (23:15 ישראל)
-      timezone: "America/New_York"
-
+    - cron: '0 17-23 * * 1-5'
+      timezone: "Asia/Jerusalem"
   workflow_dispatch:
-    inputs:
-      run_kind:
-        description: 'סוג ריצה (auto = לפי שעון ניו יורק: אחרי 16:00 ET = EOD)'
-        type: choice
-        options: [auto, INTRADAY, EOD]
-        default: auto
 
 jobs:
-  # ── שלב 1: שומר-סף — רץ מיד, בלי תור ──
-  gate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      run: ${{ steps.gate.outputs.run }}
-      kind: ${{ steps.gate.outputs.kind }}
-      slot_et: ${{ steps.gate.outputs.slot_et }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Market gate (holidays / delay / run kind)
-        id: gate
-        env:
-          WTC_EVENT: ${{ github.event_name }}
-          WTC_SCHEDULE: ${{ github.event.schedule }}
-          WTC_CRON_TZ: America/New_York
-          WTC_FORCE_KIND: ${{ inputs.run_kind || 'auto' }}
-        run: |
-          pip install --quiet pandas_market_calendars || echo "⚠️ calendar install failed — gate will use fallback holiday list"
-          python market_gate.py
-
-  # ── שלב 2: הריצה עצמה — רק אם השומר אישר. רק כאן יש תור (Daily Log). ──
   run-sentinel:
-    needs: gate
-    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # ריצה אחת בכל פעם, כדי ששתי ריצות לא יכתבו ל-Daily Log במקביל
     concurrency:
       group: wtc-sentinel-single-run
       cancel-in-progress: false
@@ -117,6 +47,4 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WTC_RUN_KIND: ${{ needs.gate.outputs.kind }}   # INTRADAY / EOD — נקרא ב-is_end_of_day_run()
-          WTC_SLOT_ET: ${{ needs.gate.outputs.slot_et }}
         run: python main.py
