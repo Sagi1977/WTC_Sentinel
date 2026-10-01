@@ -1,44 +1,47 @@
 name: WTC Sentinel Execution
-# NEW2 — 28/09/2026: DST-safe + יום שני + חגי NYSE
-# 🔧 01/10/2026 — תיקון: ב-29/09 וב-30/09 אף ריצה מתוזמנת לא הגיעה ל-main.py
-#   (נבדק מול ה-Daily Log — רק ריצות ידניות נכתבו). שלושה שינויים:
-#   1. השומר (gate) עבר ל-job נפרד, *מחוץ* לתור ה-concurrency. קודם כל 19
-#      הטריגרים (כולל 6 של "הגרסה השנייה" שרק מדלגים) עמדו באותו תור,
-#      ו-GitHub שומר בתור רק ריצה ממתינה אחת — כל טריגר חדש *מבטל* את
-#      הממתין הקודם, כולל ריצה אמיתית שבוטלה ע"י טריגר-דמה. עכשיו רק ריצות
-#      שהשומר אישר נכנסות לתור.
-#   2. העיכוב הנמדד הוא עכשיו עיכוב GitHub בלבד, לא זמן-המתנה בתור.
-#   3. שורות ה-cron זזו 3 דקות אחרי הסלוט (:33/:03/:48/:18) — GitHub מעכב
-#      במיוחד טריגרים בדיוק ב-:00/:30. market_gate.py משייך כל טריגר לסלוט
-#      שלפניו (סבילות 0–14 דק').
+# 🔧 01/10/2026 (ערב) — שורות ה-cron מוגדרות עכשיו ישירות בשעון ניו יורק,
+#   עם timezone: America/New_York (תמיכה מובנית של GitHub מ-03/2026).
+#   GitHub עצמו מטפל בשעון קיץ/חורף — אין יותר כפל שורות EDT/EST ו-6 שורות "דמה".
+#   15 שורות = 15 סלוטים אמיתיים בלבד.
 #
 # בשעון ישראל (רוב השנה): 16:33, 16:48, 17:03, 17:33 ... 22:33, ו-23:18 (EOD).
-# בשבועות המעבר (25/10–31/10 וכו') הכל שעה מוקדם יותר — וזה נכון, נצמד לשוק.
+# בשבועות המעבר (25/10–31/10 וכו') הכל שעה מוקדם יותר — נכון, נצמד לשוק.
+# הדקות 3/18/33/48 — לא :00/:30, שם GitHub מעכב ומשמיט הכי הרבה.
 #
-# ⚠️ כל שורת cron חייבת להיות שעה אחת בודדת (בלי "3,33").
+# market_gate.py עדיין רץ ראשון: חגי NYSE, ימים מקוצרים, וסוג הריצה (INTRADAY/EOD).
 
 on:
   schedule:
-    # ───── UTC ─────  EDT (קיץ ארה"ב, UTC-4)   EST (חורף ארה"ב, UTC-5)
-    - cron: '33 13 * * 1-5'   # 09:30 ET פתיחה           —
-    - cron: '48 13 * * 1-5'   # 09:45                    —
-    - cron: '3 14 * * 1-5'    # 10:00                    —
-    - cron: '33 14 * * 1-5'   # 10:30                    09:30 ET פתיחה
-    - cron: '48 14 * * 1-5'   # —                        09:45
-    - cron: '3 15 * * 1-5'    # 11:00                    10:00
-    - cron: '33 15 * * 1-5'   # 11:30                    10:30
-    - cron: '3 16 * * 1-5'    # 12:00                    11:00
-    - cron: '33 16 * * 1-5'   # 12:30                    11:30
-    - cron: '3 17 * * 1-5'    # 13:00                    12:00
-    - cron: '33 17 * * 1-5'   # 13:30                    12:30
-    - cron: '3 18 * * 1-5'    # 14:00                    13:00
-    - cron: '33 18 * * 1-5'   # 14:30                    13:30
-    - cron: '3 19 * * 1-5'    # 15:00                    14:00
-    - cron: '33 19 * * 1-5'   # 15:30 (שעה אחרונה)       14:30
-    - cron: '3 20 * * 1-5'    # —                        15:00
-    - cron: '18 20 * * 1-5'   # 16:15 EOD                —
-    - cron: '33 20 * * 1-5'   # —                        15:30 (שעה אחרונה)
-    - cron: '18 21 * * 1-5'   # —                        16:15 EOD
+    - cron: '33 9 * * 1-5'     # 09:30 ET פתיחה   (16:30 ישראל)
+      timezone: "America/New_York"
+    - cron: '48 9 * * 1-5'     # 09:45
+      timezone: "America/New_York"
+    - cron: '3 10 * * 1-5'     # 10:00
+      timezone: "America/New_York"
+    - cron: '33 10 * * 1-5'    # 10:30
+      timezone: "America/New_York"
+    - cron: '3 11 * * 1-5'     # 11:00
+      timezone: "America/New_York"
+    - cron: '33 11 * * 1-5'    # 11:30
+      timezone: "America/New_York"
+    - cron: '3 12 * * 1-5'     # 12:00
+      timezone: "America/New_York"
+    - cron: '33 12 * * 1-5'    # 12:30
+      timezone: "America/New_York"
+    - cron: '3 13 * * 1-5'     # 13:00
+      timezone: "America/New_York"
+    - cron: '33 13 * * 1-5'    # 13:30
+      timezone: "America/New_York"
+    - cron: '3 14 * * 1-5'     # 14:00
+      timezone: "America/New_York"
+    - cron: '33 14 * * 1-5'    # 14:30
+      timezone: "America/New_York"
+    - cron: '3 15 * * 1-5'     # 15:00
+      timezone: "America/New_York"
+    - cron: '33 15 * * 1-5'    # 15:30 (אחרונה)  (22:30 ישראל)
+      timezone: "America/New_York"
+    - cron: '18 16 * * 1-5'    # 16:15 EOD        (23:15 ישראל)
+      timezone: "America/New_York"
 
   workflow_dispatch:
     inputs:
@@ -49,7 +52,7 @@ on:
         default: auto
 
 jobs:
-  # ── שלב 1: שומר-סף — רץ מיד, בלי תור. האם זה סלוט אמיתי ויום מסחר? ──
+  # ── שלב 1: שומר-סף — רץ מיד, בלי תור ──
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -66,11 +69,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Market gate (DST / holidays / delay)
+      - name: Market gate (holidays / delay / run kind)
         id: gate
         env:
           WTC_EVENT: ${{ github.event_name }}
           WTC_SCHEDULE: ${{ github.event.schedule }}
+          WTC_CRON_TZ: America/New_York
           WTC_FORCE_KIND: ${{ inputs.run_kind || 'auto' }}
         run: |
           pip install --quiet pandas_market_calendars || echo "⚠️ calendar install failed — gate will use fallback holiday list"
