@@ -554,6 +554,25 @@ def get_entry_baseline(ticker, file_dt):
         return None, None
 
 
+# 🔧 (02/10/2026) — ניקוי הטקסט שנכתב ל-Daily Log ב-Drive (לא משפיע על טלגרם).
+# ממצא: Google מייצא text/plain עם סיומות שורה של Windows (\r\n). התיקון של
+# 01/10 חיפש רק \n, ולכן לא תפס כלום והשורות הריקות המשיכו להכפיל את עצמן.
+# עכשיו: (1) מנרמלים \r\n/\r ל-\n; (2) מוחקים אימוג'ים — בלוג בלבד, הם
+# נשארים בהודעות הטלגרם; (3) לא משאירים יותר משורה ריקה אחת ברצף.
+_DRIVE_EMOJI_RE = re.compile(
+    "(?:[\U0001F000-\U0001FAFF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF"
+    "\u2190-\u21FF\u25A0-\u25FF][\uFE0F\uFE0E\u200D\u20E3]*)+ ?"
+)
+
+
+def _clean_drive_log_text(text):
+    """הלוג ב-Drive = בדיוק אותו טקסט כמו בטלגרם, בלי אייקונים ובלי שורות ריקות.
+    האייקון נמחק יחד עם הרווח שאחריו, כך שהטבלאות נשארות מיושרות כמו בטלגרם."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
+    text = _DRIVE_EMOJI_RE.sub("", text)
+    return "\n".join(l.rstrip() for l in text.split("\n") if l.strip())
+
+
 def log_to_drive(service, message):
     """
     שומר כל הודעת טלגרם על ידי עדכון קובץ Google Doc קיים ב-Drive.
@@ -587,7 +606,7 @@ def log_to_drive(service, message):
     now_il = now_utc.astimezone(il_tz)
 
     ts = now_il.strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
+    entry = "\n" + _clean_drive_log_text(f"[{ts}]\n{message}")
 
     # ה-ID המדויק של הקובץ שיצרת
     # 🔧 תוקן 26/09/2026 — ממצא שורש-הבעיה: ה-FILE_ID הישן
@@ -649,7 +668,9 @@ def log_to_drive(service, message):
             # שורות מחק בפועל כמעט את כל ההיסטוריה (~7 ריצות נשמרו). מכווצים כל
             # רצף של 2+ שורות ריקות לשורה ריקה אחת לפני כל כתיבה — גם מרפא את
             # הקובץ הקיים בכתיבה הראשונה.
-            existing_content = re.sub(r'\n[ \t\u00a0\ufeff]*(?:\n[ \t\u00a0\ufeff]*)+\n', '\n\n', existing_content)
+            # 🔧 (02/10/2026) הגרסה הקודמת (regex על \n בלבד) לא עבדה — Google
+            # מחזיר \r\n. ראו _clean_drive_log_text למעלה.
+            existing_content = _clean_drive_log_text(existing_content).rstrip("\n")
 
             lines = existing_content.split('\n')
             if len(lines) > 76000:
