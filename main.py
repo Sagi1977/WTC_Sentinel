@@ -54,6 +54,9 @@ EXIT_BASELINE_FILE_ID = "1tEGATqVMyOEEWlNM7PFAbgAxT0IH0nED19qBrYYFEbw"
 
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
+# 🕐 31/10/2026: שעת הקובץ בשם ה-Golden נוצרת ב-Colab עם datetime.now() ו-Colab רץ ב-UTC
+# (אומת ע"י המשתמש). לכן שם הקובץ הוא UTC - לא שעון ישראל. אם פעם ייקבע אזור זמן ב-Colab, לשנות כאן.
+GOLDEN_FILE_TZ = "UTC"
 RTH_START = (9, 30)
 RTH_END_HOUR = 16
 
@@ -125,6 +128,7 @@ def send_msg(text, retries=2, sleep_seconds=0.5):
                 )
                 if r.ok:
                     log_event("INFO", "send_msg", "telegram chunk sent", status_code=r.status_code)
+                    last_error = None   # 🔧 01/11/2026 (BOT-5): ניסיון קודם שנכשל לא יירשם כ"כשל" אחרי שהמסירה הצליחה
                     break
                 last_error = f"HTTP {r.status_code}: {r.text[:200]}"
             except Exception as e:
@@ -157,6 +161,18 @@ def normalize_columns(df):
         return df
     clean = {c: re.sub(r"[^a-zA-Z0-9]", "", str(c)).lower() for c in df.columns}
     return df.rename(columns=clean)
+
+
+# 🔧 31/10/2026 (ביקורת מערכתית, ממצא M-1): read_csv ברירת-מחדל הופך את המחרוזת 'NA' ל-NaN,
+# וזה גם הטיקר האמיתי NA (Nano Labs) -> 'NAN' בדוח ובחישובי המחזור. אותה רשימת ערכים ריקים
+# כמו ברירת המחדל של pandas, חוץ מ-'NA' (כדי שערכים ריקים/"N/A"/"null" עדיין יהפכו ל-NaN).
+_CSV_NA_VALUES = ["", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
+                  "1.#IND", "1.#QNAN", "<NA>", "N/A", "NULL", "NaN", "None", "n/a", "nan", "null"]
+
+
+def read_golden_csv(fh):
+    return pd.read_csv(fh, encoding="utf-8-sig", engine="python",
+                       keep_default_na=False, na_values=_CSV_NA_VALUES)
 
 
 def find_selection_col(df):
@@ -201,7 +217,7 @@ def download_latest_file(service, prefix):
         while not done:
             _, done = downloader.next_chunk()
         fh.seek(0)
-        df = pd.read_csv(fh, encoding="utf-8-sig", engine="python")
+        df = read_golden_csv(fh)
         df = normalize_columns(df)
         validate_output_schema(df, prefix)
         return df, f"Loaded: {files[0]['name']}", files[0]['name']
@@ -465,6 +481,26 @@ def get_market_dashboard():
 # 7. WATCHLIST / OUTPUT LOGIC
 # =========================================================
 def build_dynamic_watchlist(service):
+    # 🔁 31/10/2026 (BackToBasic): מצב מחזור - הרשימה היא 5 המניות של המחזור
+    # הפעיל (לא הקובץ האחרון). אם אין מחזור (לפני 02/11/2026 / אין קובץ התחלה /
+    # שגיאה) - נופלים להתנהגות הקודמת בדיוק (הקובץ האחרון).
+    CYCLE_CONTEXT.clear()
+    CYCLE_NOTES.clear()
+    try:
+        _cyc = resolve_active_cycle(service)
+    except Exception as e:
+        _cyc = None
+        log_event("ERROR", "build_dynamic_watchlist", "resolve_active_cycle failed - legacy mode", error=str(e)[:200])
+        if _dt.now(pytz.timezone(RTH_TZ)).date() >= CYCLE_START_DATE:
+            CYCLE_NOTES.append("⚠️ Cycle engine FAILED this run — showing the LATEST Golden file, "
+                               "which may be a measurement-only run. Do not act on it as holdings.")
+    if _cyc is None and not CYCLE_NOTES and _dt.now(pytz.timezone(RTH_TZ)).date() >= CYCLE_START_DATE:
+        CYCLE_NOTES.append("ℹ️ No cycle started yet (no Golden file on/after "
+                           f"{CYCLE_START_DATE.strftime('%d/%m')}) — showing latest Golden file.")
+    if _cyc:
+        CYCLE_CONTEXT.update(_cyc["context"])
+        return _cyc["watchlist"], _cyc["logs"], _cyc["file_dt"]
+
     watchlist, logs = {}, []
     golden_file_dt = None
     for prefix in DRIVE_PREFIXES:
@@ -520,7 +556,7 @@ def parse_golden_file_dt(filename):
 def get_entry_baseline(ticker, file_dt):
     """
     מחזיר (entry_date, entry_open) — נקודת הכניסה לפי יישור הקו.
-    הקובץ נוצר בשעון ישראל; ההמרה ל-ET נעשית עם pytz (DST-safe).
+    שעת הקובץ בשם = GOLDEN_FILE_TZ (UTC ב-Colab); ההמרה ל-ET נעשית עם pytz (DST-safe).
     אם הקובץ נוצר לפני פתיחת השוק (09:30 ET) → הכניסה באותו יום מסחר.
     אחרת → ביום המסחר הבא. מחזיר (None, None) אם יום הכניסה טרם נסחר.
     """
@@ -528,7 +564,7 @@ def get_entry_baseline(ticker, file_dt):
         return None, None
     try:
         # ✅ Sprint 1: המרה DST-safe עם pytz (במקום hours=7 קשיח)
-        israel_tz = pytz.timezone('Asia/Jerusalem')
+        israel_tz = pytz.timezone(GOLDEN_FILE_TZ)   # (שם המשתנה ישן; זה אזור הזמן של שם הקובץ)
         et_tz     = pytz.timezone('America/New_York')
         file_localized = israel_tz.localize(file_dt) if file_dt.tzinfo is None else file_dt
         file_et = file_localized.astimezone(et_tz)
@@ -537,12 +573,24 @@ def get_entry_baseline(ticker, file_dt):
         if file_et.hour > 9 or (file_et.hour == 9 and file_et.minute >= 30):
             target_date = target_date + _td(days=1)
 
-        daily = get_cached_yf_download(ticker, period="1mo", interval="1d")
+        # 🔧 31/10/2026 (ביקורת מערכתית, ממצא BOT-1): היה period="1mo" - כשקובץ ה-Golden
+        # ישן מחודש, הבר הראשון בחלון (מאוחר מיום הכניסה האמיתי) הוחזר כאילו היה הכניסה, וכך
+        # תאריך/מחיר הכניסה (גם של QQQ) "החליקו" יום קדימה בכל ריצה - P&L, vsQQQ, Alpha וגם
+        # שורת Perf-History שנשמרת בדיסק יצאו שגויים (חי עכשיו: אחזקות 28/09 הן >חודש).
+        # עכשיו: אותם נתונים יומיים של 2y כמו מנוע המחזור (_daily_ohlc, אותו מפתח cache ->
+        # בלי קריאת Yahoo נוספת), ואם החלון מתחיל אחרי יום הכניסה - מחזירים None, לא ערך שגוי.
+        daily = get_cached_yf_download(ticker, period="2y", interval="1d")
         open_s = extract_col(daily, "Open")
         if open_s is None:
             return None, None
         open_s = open_s.dropna()
         if open_s.empty:
+            return None, None
+        _first_idx = open_s.index[0]
+        _first_d = _first_idx.date() if hasattr(_first_idx, "date") else pd.to_datetime(_first_idx).date()
+        if _first_d > target_date:
+            log_event("WARN", "get_entry_baseline", "price window starts after the entry date - not guessing",
+                      ticker=ticker, window_start=str(_first_d), entry_date=str(target_date))
             return None, None
         for idx, val in open_s.items():
             d = idx.date() if hasattr(idx, "date") else pd.to_datetime(idx).date()
@@ -554,23 +602,344 @@ def get_entry_baseline(ticker, file_dt):
         return None, None
 
 
-# 🔧 (02/10/2026) — ניקוי הטקסט שנכתב ל-Daily Log ב-Drive (לא משפיע על טלגרם).
-# ממצא: Google מייצא text/plain עם סיומות שורה של Windows (\r\n). התיקון של
-# 01/10 חיפש רק \n, ולכן לא תפס כלום והשורות הריקות המשיכו להכפיל את עצמן.
-# עכשיו: (1) מנרמלים \r\n/\r ל-\n; (2) מוחקים אימוג'ים — בלוג בלבד, הם
-# נשארים בהודעות הטלגרם; (3) לא משאירים יותר משורה ריקה אחת ברצף.
-_DRIVE_EMOJI_RE = re.compile(
-    "(?:[\U0001F000-\U0001FAFF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF"
-    "\u2190-\u21FF\u25A0-\u25FF][\uFE0F\uFE0E\u200D\u20E3]*)+ ?"
-)
+# =========================================================
+# 🔁 CYCLE ENGINE — נוסף 31/10/2026 (BackToBasic)
+# ---------------------------------------------------------------
+# כללי המחזור (הוחלטו 31/10 עם המשתמש):
+#   • קונים 5 מניות (3 Anchor + 2 Turbo) במשקל שווה, ברגע שיש רשימה.
+#   • יציאה לכל מניה: אחרי HOLD_TRADING_DAYS ימי מסחר, או כשה-Low היומי
+#     נוגע ב-SL (STOP_LOSS_PCT מתחת לפתיחת יום-הכניסה) - מה שקודם.
+#   • בלי מילוי-מחדש באמצע מחזור. מחזור חדש מתחיל ביום שני הבא אחרי שכל
+#     ה-5 יצאו (ריצת ה-Golden של אותו יום שני = רשימת הקנייה).
+#   • Golden Plan ממשיך לרוץ כל שבוע - אבל ריצות באמצע מחזור הן "מדידה
+#     בלבד" (לא קונים). הבוט מחשב את מצב המחזור בעצמו מהקבצים והמחירים;
+#     אין קובץ אחזקות נפרד.
+# ⚠️ HOLD_TRADING_DAYS / STOP_LOSS_PCT חייבים להישאר זהים לערכים
+#    ב-WTC_BackToBasic.py.
+# עד CYCLE_START_DATE (או כל עוד אין קובץ Golden מאותו תאריך ואילך) הבוט
+# ממשיך להתנהג כמו קודם (הקובץ האחרון) - כך שהאחזקות הנוכחיות עדיין מוצגות.
+# עקיפה ידנית למחזור 1: משתנה סביבה ACTIVE_CYCLE_FILE (שם קובץ Golden).
+# =========================================================
+from datetime import date as _date
+
+HOLD_TRADING_DAYS = 20
+STOP_LOSS_PCT = 0.15
+CYCLE_START_DATE = _date(2026, 11, 2)
+CYCLE_FILE_OVERRIDE = os.environ.get("ACTIVE_CYCLE_FILE", "").strip()
+CYCLE_CONTEXT = {}   # נכתב ע"י build_dynamic_watchlist, נקרא ע"י get_portfolio_performance
+CYCLE_NOTES = []     # הודעות סטטוס (למשל: מנוע המחזור נכשל -> מוצג הקובץ האחרון), מוצגות בראש הדוח
+_GOLDEN_NAME_RE = _re.compile(r'^Golden_Plan_STOCKS_(\d{8})_(\d{6})')
 
 
-def _clean_drive_log_text(text):
-    """הלוג ב-Drive = בדיוק אותו טקסט כמו בטלגרם, בלי אייקונים ובלי שורות ריקות.
-    האייקון נמחק יחד עם הרווח שאחריו, כך שהטבלאות נשארות מיושרות כמו בטלגרם."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
-    text = _DRIVE_EMOJI_RE.sub("", text)
-    return "\n".join(l.rstrip() for l in text.split("\n") if l.strip())
+def _entry_target_date(file_dt):
+    """אותו כלל כניסה כמו get_entry_baseline: לפני 09:30 ET -> אותו יום; אחרת -> היום הבא."""
+    israel_tz = pytz.timezone(GOLDEN_FILE_TZ)   # אזור הזמן של שם הקובץ (UTC ב-Colab)
+    et_tz = pytz.timezone('America/New_York')
+    file_localized = israel_tz.localize(file_dt) if file_dt.tzinfo is None else file_dt
+    file_et = file_localized.astimezone(et_tz)
+    target = file_et.date()
+    if file_et.hour > 9 or (file_et.hour == 9 and file_et.minute >= 30):
+        target = target + _td(days=1)
+    return target
+
+
+def _bar_complete(d):
+    """האם נר היום-מסחר d כבר סגור (תאריך לפני היום ב-ET, או היום אחרי 16:00 ET)."""
+    now_et = _dt.now(pytz.timezone(RTH_TZ))
+    return d < now_et.date() or (d == now_et.date() and now_et.hour >= RTH_END_HOUR)
+
+
+def _next_monday_after(d):
+    """יום שני הבא *אחרי* d (אם d הוא שני - השני של שבוע הבא)."""
+    return d + _td(days=(7 - d.weekday()) % 7 or 7)
+
+
+def _daily_ohlc(ticker):
+    """DataFrame יומי (Open/Low/Close) עם אינדקס של date, או None."""
+    daily = get_cached_yf_download(ticker, period="2y", interval="1d")
+    o, lo, c = extract_col(daily, "Open"), extract_col(daily, "Low"), extract_col(daily, "Close")
+    if o is None or lo is None or c is None:
+        return None
+    df = pd.concat([o, lo, c], axis=1, keys=["Open", "Low", "Close"]).dropna()
+    if df.empty:
+        return None
+    df.index = [i.date() if hasattr(i, "date") else pd.to_datetime(i).date() for i in df.index]
+    return df
+
+
+def _qqq_ret_between(entry_date, end_date=None):
+    """תשואת QQQ מפתיחת entry_date ועד סגירת end_date (או הסגירה האחרונה)."""
+    try:
+        df = _daily_ohlc("QQQ")
+        if df is None:
+            return None
+        sess = df[[d >= entry_date for d in df.index]]
+        if end_date is not None:
+            sess = sess[[d <= end_date for d in sess.index]]
+        if sess.empty:
+            return None
+        return calc_pct_change(float(sess["Close"].iloc[-1]), float(sess["Open"].iloc[0]))
+    except Exception as e:
+        log_event("ERROR", "_qqq_ret_between", "qqq return failed", error=str(e)[:160])
+        return None
+
+
+def compute_position_state(ticker, file_dt):
+    """
+    מצב פוזיציה אחת לפי כללי המחזור. מחזיר dict או None (אין נתונים).
+    status: PENDING (יום הכניסה עוד לא נסחר) | ACTIVE | SL | 20D
+    כניסה = Open של הסשן הראשון אחרי שעת הקובץ. SL = Low יומי <= כניסה*(1-STOP_LOSS_PCT)
+    בתוך HOLD_TRADING_DAYS הסשנים הראשונים; יציאה במחיר ה-SL (או ב-Open אם נפתח מתחתיו).
+    """
+    try:
+        entry_target = _entry_target_date(file_dt)
+        df = _daily_ohlc(ticker)
+        if df is None:
+            return None
+        sess = df[[d >= entry_target for d in df.index]]
+        if sess.empty:
+            return {"status": "PENDING", "entry_date": entry_target, "entry_open": None,
+                    "sl_level": None, "exit_date": None, "exit_price": None,
+                    "curr": float(df["Close"].iloc[-1]), "days_held": 0}
+        entry_open = float(sess["Open"].iloc[0])
+        if entry_open <= 0:
+            return None
+        sl_level = entry_open * (1 - STOP_LOSS_PCT)
+        window = sess.iloc[:HOLD_TRADING_DAYS]
+        hit = window[window["Low"] <= sl_level]
+        state = {"entry_date": sess.index[0], "entry_open": entry_open, "sl_level": sl_level,
+                 "curr": float(sess["Close"].iloc[-1]), "days_held": int(min(len(sess), HOLD_TRADING_DAYS)),
+                 "exit_date": None, "exit_price": None}
+        if not hit.empty:
+            state.update(status="SL", exit_date=hit.index[0],
+                         exit_price=min(sl_level, float(hit["Open"].iloc[0])))
+        elif len(sess) >= HOLD_TRADING_DAYS and _bar_complete(window.index[-1]):
+            # רק נר *סגור* נספר כיום 20 (אחרת ריצה באמצע היום 20 הייתה מכריזה יציאה/סיום מחזור מוקדם)
+            state.update(status="20D", exit_date=window.index[-1],
+                         exit_price=float(window["Close"].iloc[-1]))
+        else:
+            state["status"] = "ACTIVE"
+        return state
+    except Exception as e:
+        log_event("ERROR", "compute_position_state", "position state failed", ticker=ticker, error=str(e)[:160])
+        return None
+
+
+def list_golden_files(service, limit=100):
+    """קבצי Golden_Plan_STOCKS מ-Drive, ממוינים לפי שעת-הקובץ (מהשם) עולה. Shadow_Universe_* לא מתאים לשם."""
+    out = []
+    try:
+        token = None
+        for _page in range(10):   # עד ~1000 קבצים; בלי עימוד, קובץ ההתחלה היה נושר אחרי ~100 קבצים
+            res = service.files().list(
+                q="name contains 'Golden_Plan_STOCKS' and trashed=false",
+                orderBy="createdTime desc", pageSize=limit, pageToken=token,
+                fields="nextPageToken,files(id,name,createdTime)"
+            ).execute()
+            for f in res.get("files", []):
+                if not _GOLDEN_NAME_RE.match(f["name"]):
+                    continue
+                dt = parse_golden_file_dt(f["name"])
+                if dt is not None:
+                    out.append({"id": f["id"], "name": f["name"], "dt": dt})
+            token = res.get("nextPageToken")
+            if not token:
+                break
+    except Exception as e:
+        log_event("ERROR", "list_golden_files", "drive list failed", error=str(e)[:200])
+        raise
+    out.sort(key=lambda x: x["dt"])
+    return out
+
+
+def _download_drive_df(service, file_id, prefix="Golden_Plan_STOCKS", allow_empty=False):
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, service.files().get_media(fileId=file_id))
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    fh.seek(0)
+    try:
+        df = normalize_columns(read_golden_csv(fh))
+    except pd.errors.EmptyDataError:
+        # קובץ של 0 בתים (כתיבה שנקטעה) - ריק, לא "כשל פענוח"
+        if allow_empty:
+            return pd.DataFrame()
+        raise
+    if allow_empty and df.empty:
+        return df
+    validate_output_schema(df, prefix)
+    return df
+
+
+def _cycle_pick_rows(service, f):
+    """
+    [(ticker, label, score)] לשורות שסומנו Anchor/Turbo בקובץ Golden f.
+    [] = הקובץ ריק / בלי אף בחירה (אין "רשימת קנייה" בו). כשל אמיתי (הורדה מ-Drive,
+    עמודות חסרות) *לא* נבלע - הוא נזרק, כדי שלא נבחר קובץ מאוחר יותר בטעות.
+    """
+    df = _download_drive_df(service, f["id"], allow_empty=True)
+    if df is None or df.empty:
+        return []
+    tcol, sel, scol = validate_output_schema(df, "Golden_Plan_STOCKS")
+    mask = df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
+    rows = []
+    for _, row in df[mask].iterrows():
+        t = str(row[tcol]).strip().upper()
+        if t:
+            rows.append((t, str(row[sel]), row.get(scol, np.nan) if scol else np.nan))
+    return rows
+
+
+def _force_overdue_exits(positions, file_dt):
+    """
+    מניה שנתקעה (נמחקה/נרכשה/שונה שם/כשל yfinance) לא תיקבע לעולם כ"יצאה" לפי הנתונים
+    שלה, ואז המחזור לא היה נסגר. לוח הזמנים נקבע לפי QQQ: ברגע ש-HOLD_TRADING_DAYS ימי
+    מסחר *סגורים* עברו מהכניסה, כל פוזיציה שעוד לא יצאה נסגרת כ-20D (forced) במחיר
+    הסגירה האחרון הידוע שלה; בלי נתונים בכלל - נסגרת בלי מחיר (לא נכנסת לממוצע).
+    """
+    try:
+        entry_target = _entry_target_date(file_dt)
+        q = _daily_ohlc("QQQ")
+        if q is None:
+            return
+        cal = [d for d in q.index if d >= entry_target and _bar_complete(d)]
+        if len(cal) < HOLD_TRADING_DAYS:
+            return
+        deadline = cal[HOLD_TRADING_DAYS - 1]
+        for t in list(positions.keys()):
+            p = positions[t]
+            # 🔧 31/10/2026 (ביקורת מערכתית, ממצא BOT-3): לוח הזמנים היחיד הוא של QQQ. פוזיציה
+            # שיצאה "בעצמה" אחרי המועד הזה (למשל כי חסר לה בר יומי אחד ב-Yahoo, אז היום ה-20 שלה
+            # מתאחר ביום) נסגרת כאן במועד QQQ - אחרת תאריך סיום המחזור (ורשימת הקנייה הבאה)
+            # היה קופץ אחורה/קדימה בין ריצות. פוזיציה שיצאה עד המועד - כמו קודם.
+            if (p is not None and p["status"] in ("SL", "20D")
+                    and p.get("exit_date") is not None and p["exit_date"] <= deadline):
+                continue
+            if p is None:
+                positions[t] = {"status": "20D", "forced": True, "nodata": True,
+                                "entry_date": entry_target, "entry_open": None, "sl_level": None,
+                                "exit_date": deadline, "exit_price": None, "curr": None,
+                                "days_held": HOLD_TRADING_DAYS}
+            else:
+                df = _daily_ohlc(t)
+                px = p.get("curr")
+                if df is not None:
+                    upto = df[[d <= deadline for d in df.index]]
+                    if not upto.empty:
+                        px = float(upto["Close"].iloc[-1])
+                p.update(status="20D", forced=True, exit_date=deadline, exit_price=px,
+                         days_held=HOLD_TRADING_DAYS)
+            log_event("WARN", "_force_overdue_exits", "forced 20D exit for stuck position", ticker=t)
+    except Exception as e:
+        log_event("ERROR", "_force_overdue_exits", "forced exit failed", error=str(e)[:160])
+
+
+def resolve_active_cycle(service, today=None):
+    """
+    מחשב את מצב המחזור הנוכחי בלי שום מצב שמור - רק מקבצי ה-Golden ומחירים.
+    מחזיר None אם צריך להתנהג כמו קודם (לפני תחילת המחזורים / אין קובץ התחלה).
+    אחרת dict: watchlist, logs, file_dt, context.
+    """
+    today = today or _dt.now(pytz.timezone(RTH_TZ)).date()
+    if service is None or today < CYCLE_START_DATE:
+        return None
+    files = list_golden_files(service)
+    if not files:
+        return None
+    latest = files[-1]
+    floor = CYCLE_START_DATE
+    cycle_no = 1
+    completed = []
+    last = None   # תוצאות המחזור האחרון שנבדק
+
+    for _guard in range(60):
+        cand = [f for f in files if f["dt"].date() >= floor]
+        if CYCLE_FILE_OVERRIDE and cycle_no == 1:
+            ov = [f for f in files if f["name"] == CYCLE_FILE_OVERRIDE]
+            if ov:
+                cand = ov
+        if not cand:
+            if not completed:
+                return None   # עוד לא רצה ריצת ההתחלה -> התנהגות קודמת (האחזקות הנוכחיות)
+            # המחזור הקודם הסתיים; מחכים לריצת יום שני הבא
+            return _build_cycle_result(last, completed, "WAITING_NEXT", latest, next_floor=floor)
+        # 🔧 31/10/2026: הקובץ *הראשון* של היום הוא רשימת הקנייה ("קונים מיד ברגע
+        # שיש רשימה"). ריצה חוזרת באותו יום (למשל ערב) היא מדידה בלבד. לבחירה אחרת
+        # במחזור 1 - ACTIVE_CYCLE_FILE.
+        # 🔧 31/10/2026 (ביקורת מערכתית, ממצא M-5): "הראשון" = הראשון *שיש בו רשימת קנייה*
+        # (לפחות מניה אחת Anchor/Turbo). קודם: אם הקובץ הראשון היה ריק / בלי בחירות, המחזור
+        # לא התחיל לעולם (נשאר "No cycle started yet" / "Cycle engine FAILED") גם אם ריצה
+        # מאוחרת יותר באותו שבוע הייתה רשימה אמיתית. קובץ ראשון עם בחירות - בדיוק כמו קודם.
+        chosen, rows = None, []
+        for f in sorted(cand, key=lambda x: x["dt"]):
+            rows = _cycle_pick_rows(service, f)
+            if rows:
+                chosen = f
+                break
+            log_event("WARN", "resolve_active_cycle", "Golden file has no Anchor/Turbo picks - not a buy list, skipped",
+                      file=f["name"])
+        if chosen is None:
+            if not completed:
+                CYCLE_NOTES.append(f"ℹ️ {len(cand)} Golden file(s) since {floor.strftime('%d/%m')} had no Anchor/Turbo picks — "
+                                   "no buy list yet — showing latest Golden file.")
+                return None   # עוד לא הייתה רשימת קנייה -> התנהגות קודמת
+            return _build_cycle_result(last, completed, "WAITING_NEXT", latest, next_floor=floor)
+        positions = {t: compute_position_state(t, chosen["dt"]) for t, _, _ in rows}
+        _force_overdue_exits(positions, chosen["dt"])
+        # 🔧 31/10/2026 (ביקורת מערכתית, ממצא BOT-4): "אין נתונים" לא נקרא כ"לא יצאה". אם הורדות
+        # המחירים נכשלו (Yahoo חסם/נפל) גם ל-QQQ וגם לפוזיציה - אי אפשר לגזור מצב מחזור, וקודם
+        # המחזור הישן הוצג כ-ACTIVE והרשימה החדשה סומנה "MEASUREMENT ONLY - אל תקנה". עכשיו חריגה
+        # -> build_dynamic_watchlist מציג "Cycle engine FAILED" גלוי ולא הוראה שגויה.
+        if any(p is None for p in positions.values()) and _daily_ohlc("QQQ") is None:
+            raise RuntimeError(f"price data unavailable for cycle {cycle_no} - state cannot be derived")
+        last = {"no": cycle_no, "file": chosen, "rows": rows, "positions": positions}
+
+        all_exited = all(p is not None and p["status"] in ("SL", "20D") for p in positions.values())
+        if not all_exited:
+            # מניה בלי נתונים (None) נחשבת "לא יצאה" - אי אפשר לאשר יציאה בלי מחיר
+            return _build_cycle_result(last, completed, "ACTIVE", latest)
+
+        last_exit = max(p["exit_date"] for p in positions.values())
+        rets = [calc_pct_change(p["exit_price"], p["entry_open"]) for p in positions.values()
+                if p.get("exit_price") and p.get("entry_open")]
+        completed.append({"no": cycle_no, "file": chosen["name"],
+                          "ret": float(np.mean(rets)) if rets else 0.0, "last_exit": last_exit})
+        floor = _next_monday_after(last_exit)
+        cycle_no += 1
+    return None
+
+
+def _build_cycle_result(last, completed, state, latest, next_floor=None):
+    chosen = last["file"]
+    positions = last["positions"]
+    watchlist = {}
+    for t, label, score in last["rows"]:
+        p = positions.get(t)
+        watchlist[t] = {
+            "label": label, "score": score, "source": "Golden_Plan_STOCKS",
+            "invest": 1.0,   # משקל שווה
+            "stop_loss": (p["sl_level"] if p and p.get("sl_level") else 0.0),
+            "pos": p,
+        }
+    valid = [p for p in positions.values() if p]
+    n_exited = sum(1 for p in valid if p["status"] in ("SL", "20D"))
+    entry_dates = [p["entry_date"] for p in valid if p.get("entry_date")]
+    entry_date = min(entry_dates) if entry_dates else None
+    end_date = max((p["exit_date"] for p in valid if p.get("exit_date")), default=None) \
+        if (n_exited == len(positions) and state == "WAITING_NEXT") else None
+    ctx = {
+        "state": state, "cycle_no": last["no"], "file_name": chosen["name"], "file_dt": chosen["dt"],
+        "entry_date": entry_date, "end_date": end_date,
+        "days_held": max((p["days_held"] for p in valid), default=0),
+        "n_exited": n_exited, "n_total": len(positions),
+        "latest_name": latest["name"], "latest_dt": latest["dt"],
+        "latest_is_cycle_file": (latest["name"] == chosen["name"]),
+        "completed": completed, "next_floor": next_floor,
+    }
+    logs = f"✅ Cycle #{last['no']} ({state}): {chosen['name']} — {len(positions)} positions"
+    return {"watchlist": watchlist, "logs": logs, "file_dt": chosen["dt"], "context": ctx}
+
 
 
 def log_to_drive(service, message):
@@ -606,7 +975,7 @@ def log_to_drive(service, message):
     now_il = now_utc.astimezone(il_tz)
 
     ts = now_il.strftime("%Y-%m-%d %H:%M:%S")
-    entry = "\n" + _clean_drive_log_text(f"[{ts}]\n{message}")
+    entry = f"\n{'='*55}\n[{ts}]\n{message}\n"
 
     # ה-ID המדויק של הקובץ שיצרת
     # 🔧 תוקן 26/09/2026 — ממצא שורש-הבעיה: ה-FILE_ID הישן
@@ -661,17 +1030,6 @@ def log_to_drive(service, message):
             # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
             # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
             # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
-            # 🔧 (01/10/2026) #37 — שורש הבעיה הוכח: כל סבב export(text/plain)→
-            # update(text/plain→Google Doc) מכפיל פי 2 כל שורה ריקה קיימת. אחרי
-            # כמה ימים: 151,779 שורות, רק 242 עם טקסט. התוצאה: (1) כל כתיבה מעלה
-            # ~150K פסקאות ריקות → Google מחזיר HttpError 500; (2) חיתוך ה-76,000
-            # שורות מחק בפועל כמעט את כל ההיסטוריה (~7 ריצות נשמרו). מכווצים כל
-            # רצף של 2+ שורות ריקות לשורה ריקה אחת לפני כל כתיבה — גם מרפא את
-            # הקובץ הקיים בכתיבה הראשונה.
-            # 🔧 (02/10/2026) הגרסה הקודמת (regex על \n בלבד) לא עבדה — Google
-            # מחזיר \r\n. ראו _clean_drive_log_text למעלה.
-            existing_content = _clean_drive_log_text(existing_content).rstrip("\n")
-
             lines = existing_content.split('\n')
             if len(lines) > 76000:
                 lines = lines[-76000:]  # חותך את ההיסטוריה הישנה
@@ -706,18 +1064,6 @@ def log_to_drive(service, message):
             print(f"[CONFIRM] log_to_drive: כתיבה הצליחה ל-FILE_ID={FILE_ID} | אורך תוכן חדש={len(new_content)} תווים")
             return True
         except Exception as e:
-            # 🔧 (01/10/2026) — שגיאת שרת זמנית של Google (5xx/429) מקבלת ניסיון
-            # חוזר עם המתנה, במקום כשל מיידי. שגיאה אחרת (הרשאות וכו') — כשל מיידי.
-            status = getattr(getattr(e, 'resp', None), 'status', None)
-            try:
-                status = int(status) if status is not None else None
-            except (TypeError, ValueError):
-                status = None
-            if status in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES:
-                log_event("WARNING", "log_to_drive",
-                          f"Drive returned HTTP {status} - retrying ({attempt}/{MAX_RETRIES})")
-                time.sleep(2 * attempt + random.uniform(0, 1.5))
-                continue
             log_event("ERROR", "log_to_drive", "telegram log failed", error=str(e)[:120])
             return False
 
@@ -1054,6 +1400,36 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
 
     report = []
     report.append("📈 My Portfolio Watch (Dynamic)")
+    for _n in CYCLE_NOTES:
+        report.append(_n)
+    _cx = CYCLE_CONTEXT
+    if _cx:
+        # 🔁 31/10/2026: כותרת מחזור + תיוג ריצות מדידה
+        _st = _cx.get("state")
+        if _st == "ACTIVE":
+            report.append(f"🔁 Cycle #{_cx['cycle_no']} | day {_cx['days_held']}/{HOLD_TRADING_DAYS} | "
+                          f"exited {_cx['n_exited']}/{_cx['n_total']} | equal weight | SL {STOP_LOSS_PCT*100:.0f}% (daily Low)")
+        else:
+            _nf = _cx.get("next_floor")
+            report.append(f"✅ Cycle #{_cx['cycle_no']} COMPLETE (all {_cx['n_total']} exited) — "
+                          f"next buy list: Golden run on Monday {_nf.strftime('%d/%m') if _nf else '?'}")
+        if not _cx.get("latest_is_cycle_file"):
+            _ld = _cx.get("latest_dt")
+            _is_new = (_st == "ACTIVE" and _cx.get("days_held", 0) <= 1)
+            if _st == "ACTIVE":
+                report.append(f"ℹ️ Latest Golden ({_ld.strftime('%d/%m %H:%M') if _ld else '?'}) = MEASUREMENT ONLY — "
+                              f"do NOT buy until the cycle completes")
+            else:
+                _nf2 = _cx.get("next_floor")
+                report.append(f"ℹ️ Latest Golden ({_ld.strftime('%d/%m %H:%M') if _ld else '?'}) = measurement — "
+                              f"the next buy list is the FIRST Golden run on/after "
+                              f"{_nf2.strftime('%d/%m') if _nf2 else '?'}")
+        elif _st == "ACTIVE" and _cx.get("days_held", 0) <= 1:
+            report.append("🟢 NEW CYCLE — this Golden file is the buy list")
+        _prev = (_cx.get("completed") or [])
+        if _prev:
+            _pv = _prev[-1]
+            report.append(f"Prev cycle #{_pv['no']}: {_pv['ret']:+.1f}% (equal weight)")
     if golden_file_dt is not None:
         report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
     report.append("-" * 64)
@@ -1073,11 +1449,34 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     qqq_ret = None
     if qqq_entry_open and qqq_curr:
         qqq_ret = calc_pct_change(qqq_curr, qqq_entry_open)
+    if CYCLE_CONTEXT and CYCLE_CONTEXT.get("entry_date"):
+        # מצב מחזור: QQQ מאותה כניסה, ומוקפא ליום היציאה האחרונה כשהמחזור הסתיים
+        _q = _qqq_ret_between(CYCLE_CONTEXT["entry_date"], CYCLE_CONTEXT.get("end_date"))
+        if _q is not None:
+            qqq_ret = _q
 
-    total_invest, total_pnl_weighted = 0.0, 0.0
+    total_invest, total_pnl_weighted = 0.0, 0.0   # משקל שווה: total_invest = מספר פוזיציות
 
     for t, info in watchlist.items():
         try:
+            # 🔁 31/10/2026: פוזיציה שיצאה (SL / 20 ימים) - מוצגת לפי מחיר היציאה,
+            # בלי תלות בנתוני היום, ונכנסת לממוצע במשקל שווה.
+            _pos = info.get("pos")
+            if _pos and _pos.get("status") in ("SL", "20D") and _pos.get("entry_open"):
+                _pnl = calc_pct_change(_pos["exit_price"], _pos["entry_open"])
+                _q = _qqq_ret_between(_pos["entry_date"], _pos["exit_date"])
+                _vs = f"{(_pnl - _q):>+5.1f}" if _q is not None else "  —  "
+                total_invest += 1.0
+                total_pnl_weighted += _pnl
+                _lbl = str(info.get("label", "")).strip()
+                _lbl = (_lbl[:7] + ".") if len(_lbl) > 8 else _lbl[:8]
+                _tag = "🛑 SL" if _pos["status"] == "SL" else "⏹ 20D"
+                report.append(
+                    f"{_lbl:<9} | {t:<6} | {_pos['entry_open']:>6.2f} | {_pos['exit_price']:>6.2f} | "
+                    f"{'EXIT':>5} | {_pos['exit_date'].strftime('%d/%m'):>5} | {_pnl:>+5.1f}% | {_vs}% | {_tag}"
+                )
+                continue
+
             session_df = get_latest_rth_session(t, period="5d")
             close_s = extract_col(session_df, "Close")
             open_s = extract_col(session_df, "Open")
@@ -1113,11 +1512,10 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
                 pnl_str = f"{pnl:>+5.1f}"
                 if qqq_ret is not None:
                     vsqqq_str = f"{(pnl - qqq_ret):>+5.1f}"
-                inv = safe_float(info.get("invest", 0.0), 0.0)
-                if inv <= 0:
-                    inv = 1.0  # fallback: שקלול שווה אם אין Invest_USD
-                total_invest += inv
-                total_pnl_weighted += pnl * inv
+                # 🔧 31/10/2026: משקל שווה (היה משוקלל ב-Invest_USD) - עקבי עם כלל
+                # "5 מניות בשווה". Invest_USD מהקובץ מוצג לידיעה בלבד ולא משפיע על התשואה.
+                total_invest += 1.0
+                total_pnl_weighted += pnl
 
             # ✅ Sprint 1: סטטוס entry-relative + Stop Loss check
             sl = safe_float(info.get("stop_loss", 0.0), 0.0)
@@ -1941,7 +2339,10 @@ def main():
         log_event("ERROR", "main", "get_market_regime failed", error=str(e)[:160])
 
     try:
-        early_alerts = get_early_weakness_alerts(watchlist, service=service)
+        # 🔁 31/10/2026: התראות היחלשות רק על פוזיציות שעדיין מוחזקות (לא יצאו ב-SL / 20 ימים)
+        _held = {t: i for t, i in watchlist.items()
+                 if (i.get("pos") or {}).get("status") not in ("SL", "20D")}
+        early_alerts = get_early_weakness_alerts(_held, service=service)
     except Exception as e:
         early_alerts = ""
         log_event("ERROR", "main", "get_early_weakness_alerts failed", error=str(e)[:160])
