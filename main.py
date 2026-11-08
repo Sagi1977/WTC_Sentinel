@@ -415,8 +415,7 @@ def get_market_regime():
         if spy_close is None or len(spy_close) < 2:
             return "NEUTRAL", "SPY offline"
 
-        spy_now = float(spy_close.iloc[-1])
-        spy_prev = float(spy_close.iloc[-2])
+        spy_now, spy_prev = _spy_now_prev(spy_close)   # 🔧 02/11: לפי תאריכים, לא לפי מיקום
         spy_chg = calc_pct_change(spy_now, spy_prev)
 
         vix_hist = get_cached_yf_history("^VIX", period="5d")
@@ -447,8 +446,7 @@ def get_market_dashboard():
         if spy_cls is None or len(spy_cls) < 2:
             return "📊 WTC Sentinel Dashboard\n------------------------------\n⚠️ Dashboard Offline\n"
 
-        s_p = float(spy_cls.iloc[-1])
-        prev_c = float(spy_cls.iloc[-2])
+        s_p, prev_c = _spy_now_prev(spy_cls)   # 🔧 02/11: לפי תאריכים, לא לפי מיקום
         s_c = calc_pct_change(s_p, prev_c)
 
         vix_hist = get_cached_yf_history("^VIX", period="5d")
@@ -608,7 +606,8 @@ def get_entry_baseline(ticker, file_dt):
 # כללי המחזור (הוחלטו 31/10 עם המשתמש):
 #   • קונים 5 מניות (3 Anchor + 2 Turbo) במשקל שווה, ברגע שיש רשימה.
 #   • יציאה לכל מניה: אחרי HOLD_TRADING_DAYS ימי מסחר, או כשה-Low היומי
-#     נוגע ב-SL (STOP_LOSS_PCT מתחת לפתיחת יום-הכניסה) - מה שקודם.
+#     נוגע ב-SL (STOP_LOSS_PCT מתחת לפתיחת יום ה-Golden; יום ה-Golden = יום 1) - מה שקודם.
+#     🔧 02/11/2026: מחיר הכניסה ל-P&L = Current של ה-Golden (קנייה ברגע ה-Golden).
 #   • בלי מילוי-מחדש באמצע מחזור. מחזור חדש מתחיל ביום שני הבא אחרי שכל
 #     ה-5 יצאו (ריצת ה-Golden של אותו יום שני = רשימת הקנייה).
 #   • Golden Plan ממשיך לרוץ כל שבוע - אבל ריצות באמצע מחזור הן "מדידה
@@ -631,16 +630,74 @@ CYCLE_NOTES = []     # הודעות סטטוס (למשל: מנוע המחזור 
 _GOLDEN_NAME_RE = _re.compile(r'^Golden_Plan_STOCKS_(\d{8})_(\d{6})')
 
 
+def _file_et(file_dt):
+    """שעת קובץ ה-Golden בשעון ניו יורק (שם הקובץ הוא ב-GOLDEN_FILE_TZ, UTC ב-Colab)."""
+    tz = pytz.timezone(GOLDEN_FILE_TZ)
+    loc = tz.localize(file_dt) if file_dt.tzinfo is None else file_dt
+    return loc.astimezone(pytz.timezone('America/New_York'))
+
+
 def _entry_target_date(file_dt):
-    """אותו כלל כניסה כמו get_entry_baseline: לפני 09:30 ET -> אותו יום; אחרת -> היום הבא."""
-    israel_tz = pytz.timezone(GOLDEN_FILE_TZ)   # אזור הזמן של שם הקובץ (UTC ב-Colab)
-    et_tz = pytz.timezone('America/New_York')
-    file_localized = israel_tz.localize(file_dt) if file_dt.tzinfo is None else file_dt
-    file_et = file_localized.astimezone(et_tz)
-    target = file_et.date()
-    if file_et.hour > 9 or (file_et.hour == 9 and file_et.minute >= 30):
-        target = target + _td(days=1)
-    return target
+    """
+    🔧 02/11/2026 (אפיון: קונים ברגע שיש Golden): יום הכניסה = תאריך ה-Golden ב-ET, והוא יום 1
+    מתוך HOLD_TRADING_DAYS. קודם: קובץ אחרי 09:30 ET נחשב כניסה בפתיחת היום *הבא* (כלל ישן
+    מימי Golden-בלילה), וזה לא תאם לקנייה בפועל. אם תאריך ה-Golden אינו יום מסחר - הסשן הבא.
+    """
+    return _file_et(file_dt).date()
+
+
+def _session_date(df):
+    """תאריך ה-ET של הנר האחרון ב-DataFrame תוך-יומי (None אם אין)."""
+    try:
+        if df is None or getattr(df, "empty", False):
+            return None
+        idx = df.index
+        et_idx = idx.tz_convert(RTH_TZ) if (hasattr(idx, "tz") and idx.tz) else idx
+        return et_idx[-1].date()
+    except Exception:
+        return None
+
+
+def _prev_close_before(close_s, session_date):
+    """
+    🔧 02/11/2026: הסגירה היומית האחרונה *לפני* session_date, לפי תאריכי האינדקס ולא לפי מיקום.
+    קודם: iloc[-2] הניח שהשורה האחרונה היא היום. כשבר היום חסר/חלקי (ריצת 04/11 03:09) זה החזיר
+    את סגירת שלשום -> Day% שגוי. None אם אין סגירה כזו.
+    """
+    try:
+        if close_s is None or session_date is None:
+            return None
+        s = close_s.dropna()
+        if s.empty:
+            return None
+        dates = [i.date() if hasattr(i, "date") else pd.to_datetime(i).date() for i in s.index]
+        prior = [float(v) for d, v in zip(dates, s.values) if d < session_date]
+        return prior[-1] if prior else None
+    except Exception:
+        return None
+
+
+def _spy_now_prev(spy_close):
+    """
+    (now, prev) ל-SPY לפי תאריכי האינדקס. אם בר היום חסר בנתונים היומיים - now = סגירה אחרונה של
+    סשן SPY התוך-יומי האחרון, ו-prev = הסגירה היומית האחרונה *לפני* אותו סשן. כשל -> התנהגות ישנה.
+    """
+    s = spy_close.dropna()
+    old = (float(s.iloc[-1]), float(s.iloc[-2]))
+    try:
+        sess = get_latest_rth_session("SPY", period="5d")
+        sd = _session_date(sess)
+        cs = extract_col(sess, "Close")
+        if sd is None or cs is None or cs.dropna().empty:
+            return old
+        prev = _prev_close_before(s, sd)
+        if prev is None:
+            return old
+        last_d = s.index[-1].date() if hasattr(s.index[-1], "date") else pd.to_datetime(s.index[-1]).date()
+        now = float(s.iloc[-1]) if last_d >= sd else float(cs.dropna().iloc[-1])
+        return now, prev
+    except Exception:
+        return old
 
 
 def _bar_complete(d):
@@ -660,15 +717,47 @@ def _daily_ohlc(ticker):
     o, lo, c = extract_col(daily, "Open"), extract_col(daily, "Low"), extract_col(daily, "Close")
     if o is None or lo is None or c is None:
         return None
-    df = pd.concat([o, lo, c], axis=1, keys=["Open", "Low", "Close"]).dropna()
+    # 🔧 02/11/2026: קודם dropna() על שלוש העמודות - בר היום עם Close/Low חסר (נר חלקי מ-Yahoo)
+    # נמחק בשקט, המחזור נראה PENDING (day 0/20) ונתוני "היום" נשארו של אתמול. עכשיו נשמרת כל שורה
+    # עם Open; Low/Close חסרים נשארים NaN והצרכנים מטפלים בהם (השוואת Low עם NaN = False).
+    df = pd.concat([o, lo, c], axis=1, keys=["Open", "Low", "Close"]).dropna(subset=["Open"])
     if df.empty:
         return None
     df.index = [i.date() if hasattr(i, "date") else pd.to_datetime(i).date() for i in df.index]
     return df
 
 
-def _qqq_ret_between(entry_date, end_date=None):
-    """תשואת QQQ מפתיחת entry_date ועד סגירת end_date (או הסגירה האחרונה)."""
+def _qqq_px_at(file_dt):
+    """
+    🔧 02/11/2026: (price, src) - מחיר QQQ ברגע שעת ה-Golden, כדי שהבנצ'מרק יימדד מאותה נקודה
+    כמו הקנייה. src="5m": Close של נר 5 הדקות האחרון שנסגר עד שעת הקובץ (עד ~5 דק' לפניה).
+    גיבוי src="OPEN": Open של יום ה-Golden. (None, None) אם אין נתונים בכלל.
+    """
+    try:
+        fet = _file_et(file_dt)
+        raw = get_cached_yf_download("QQQ", period="60d", interval="5m")
+        c = extract_col(raw, "Close")
+        if c is not None:
+            c = c.dropna()
+            if not c.empty:
+                idx = pd.DatetimeIndex(c.index)
+                idx = idx.tz_localize(RTH_TZ) if idx.tz is None else idx.tz_convert(RTH_TZ)
+                ends = idx + pd.Timedelta(minutes=5)
+                mask = np.array([(e.date() == fet.date() and e <= fet) for e in ends], dtype=bool)
+                if mask.any():
+                    return float(c.values[mask][-1]), "5m"
+        q = _daily_ohlc("QQQ")
+        if q is not None:
+            s = q[[d >= fet.date() for d in q.index]]
+            if not s.empty:
+                return float(s["Open"].iloc[0]), "OPEN"
+    except Exception as e:
+        log_event("ERROR", "_qqq_px_at", "qqq price at golden failed", error=str(e)[:160])
+    return None, None
+
+
+def _qqq_ret_between(entry_date, end_date=None, base=None):
+    """תשואת QQQ מ-base (מחיר ברגע ה-Golden; בלעדיו Open של entry_date) ועד הסגירה התקפה האחרונה."""
     try:
         df = _daily_ohlc("QQQ")
         if df is None:
@@ -676,20 +765,27 @@ def _qqq_ret_between(entry_date, end_date=None):
         sess = df[[d >= entry_date for d in df.index]]
         if end_date is not None:
             sess = sess[[d <= end_date for d in sess.index]]
-        if sess.empty:
+        cl = sess["Close"].dropna()
+        if sess.empty or cl.empty:
             return None
-        return calc_pct_change(float(sess["Close"].iloc[-1]), float(sess["Open"].iloc[0]))
+        b = float(base) if (base is not None and not pd.isna(base) and float(base) > 0) else float(sess["Open"].iloc[0])
+        return calc_pct_change(float(cl.iloc[-1]), b)
     except Exception as e:
         log_event("ERROR", "_qqq_ret_between", "qqq return failed", error=str(e)[:160])
         return None
 
 
-def compute_position_state(ticker, file_dt):
+def compute_position_state(ticker, file_dt, entry_px=None):
     """
     מצב פוזיציה אחת לפי כללי המחזור. מחזיר dict או None (אין נתונים).
     status: PENDING (יום הכניסה עוד לא נסחר) | ACTIVE | SL | 20D
-    כניסה = Open של הסשן הראשון אחרי שעת הקובץ. SL = Low יומי <= כניסה*(1-STOP_LOSS_PCT)
-    בתוך HOLD_TRADING_DAYS הסשנים הראשונים; יציאה במחיר ה-SL (או ב-Open אם נפתח מתחתיו).
+    🔧 02/11/2026 (אפיון: הקנייה ברגע ה-Golden):
+      • יום הכניסה = תאריך ה-Golden ב-ET = יום 1 מתוך HOLD_TRADING_DAYS.
+      • מחיר הכניסה ל-P&L = entry_px (עמודת Current ב-Golden = המחיר החי ברגע הריצה). בלי מחיר
+        תקף: Open של יום ה-Golden (entry_src=OPEN_FALLBACK).
+      • SL = Open של יום ה-Golden * (1-STOP_LOSS_PCT), קבוע ולא זז. ה-Low היומי נבדק מיום ה-Golden
+        (כולל) בתוך HOLD_TRADING_DAYS הסשנים הראשונים; יציאה במחיר ה-SL (או ב-Open אם נפתח מתחתיו).
+    המפתח entry_open נשאר בשמו (= מחיר הכניסה) כדי לא לשבור צרכנים; open_ref = בסיס ה-SL.
     """
     try:
         entry_target = _entry_target_date(file_dt)
@@ -698,23 +794,36 @@ def compute_position_state(ticker, file_dt):
             return None
         sess = df[[d >= entry_target for d in df.index]]
         if sess.empty:
+            _cl = df["Close"].dropna()
             return {"status": "PENDING", "entry_date": entry_target, "entry_open": None,
                     "sl_level": None, "exit_date": None, "exit_price": None,
-                    "curr": float(df["Close"].iloc[-1]), "days_held": 0}
-        entry_open = float(sess["Open"].iloc[0])
-        if entry_open <= 0:
+                    "curr": float(_cl.iloc[-1]) if not _cl.empty else None, "days_held": 0}
+        open_ref = float(sess["Open"].iloc[0])
+        if not open_ref > 0:
             return None
-        sl_level = entry_open * (1 - STOP_LOSS_PCT)
+        px = None
+        try:
+            if entry_px is not None and not pd.isna(entry_px) and float(entry_px) > 0:
+                px = float(entry_px)
+        except Exception:
+            px = None
+        entry_price = px if px else open_ref
+        sl_level = open_ref * (1 - STOP_LOSS_PCT)
         window = sess.iloc[:HOLD_TRADING_DAYS]
-        hit = window[window["Low"] <= sl_level]
-        state = {"entry_date": sess.index[0], "entry_open": entry_open, "sl_level": sl_level,
-                 "curr": float(sess["Close"].iloc[-1]), "days_held": int(min(len(sess), HOLD_TRADING_DAYS)),
+        hit = window[window["Low"] <= sl_level]   # Low חסר (NaN) -> False, לא נחשב פגיעה
+        _sc = sess["Close"].dropna()
+        state = {"entry_date": sess.index[0], "entry_open": entry_price, "open_ref": open_ref,
+                 "entry_src": "GOLDEN" if px else "OPEN_FALLBACK", "sl_level": sl_level,
+                 "curr": float(_sc.iloc[-1]) if not _sc.empty else None,
+                 "days_held": int(min(len(sess), HOLD_TRADING_DAYS)),
                  "exit_date": None, "exit_price": None}
         if not hit.empty:
             state.update(status="SL", exit_date=hit.index[0],
                          exit_price=min(sl_level, float(hit["Open"].iloc[0])))
-        elif len(sess) >= HOLD_TRADING_DAYS and _bar_complete(window.index[-1]):
-            # רק נר *סגור* נספר כיום 20 (אחרת ריצה באמצע היום 20 הייתה מכריזה יציאה/סיום מחזור מוקדם)
+        elif (len(sess) >= HOLD_TRADING_DAYS and _bar_complete(window.index[-1])
+              and pd.notna(window["Close"].iloc[-1])):
+            # רק נר *סגור* עם Close תקף נספר כיום 20 (אחרת ריצה באמצע היום 20 / נר חלקי הייתה
+            # מכריזה יציאה/סיום מחזור מוקדם או יציאה במחיר NaN)
             state.update(status="20D", exit_date=window.index[-1],
                          exit_price=float(window["Close"].iloc[-1]))
         else:
@@ -774,7 +883,8 @@ def _download_drive_df(service, file_id, prefix="Golden_Plan_STOCKS", allow_empt
 
 def _cycle_pick_rows(service, f):
     """
-    [(ticker, label, score)] לשורות שסומנו Anchor/Turbo בקובץ Golden f.
+    [(ticker, label, score, entry_px)] לשורות שסומנו Anchor/Turbo בקובץ Golden f.
+    entry_px = עמודת Current (המחיר החי ברגע ה-Golden; None אם חסר/לא תקף). 🔧 02/11/2026.
     [] = הקובץ ריק / בלי אף בחירה (אין "רשימת קנייה" בו). כשל אמיתי (הורדה מ-Drive,
     עמודות חסרות) *לא* נבלע - הוא נזרק, כדי שלא נבחר קובץ מאוחר יותר בטעות.
     """
@@ -783,11 +893,14 @@ def _cycle_pick_rows(service, f):
         return []
     tcol, sel, scol = validate_output_schema(df, "Golden_Plan_STOCKS")
     mask = df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
+    pcol = "current" if "current" in df.columns else None
     rows = []
     for _, row in df[mask].iterrows():
         t = str(row[tcol]).strip().upper()
         if t:
-            rows.append((t, str(row[sel]), row.get(scol, np.nan) if scol else np.nan))
+            px = pd.to_numeric(row.get(pcol), errors="coerce") if pcol else np.nan
+            px = float(px) if (pd.notna(px) and float(px) > 0) else None
+            rows.append((t, str(row[sel]), row.get(scol, np.nan) if scol else np.nan, px))
     return rows
 
 
@@ -826,8 +939,9 @@ def _force_overdue_exits(positions, file_dt):
                 px = p.get("curr")
                 if df is not None:
                     upto = df[[d <= deadline for d in df.index]]
-                    if not upto.empty:
-                        px = float(upto["Close"].iloc[-1])
+                    _uc = upto["Close"].dropna()
+                    if not _uc.empty:
+                        px = float(_uc.iloc[-1])
                 p.update(status="20D", forced=True, exit_date=deadline, exit_price=px,
                          days_held=HOLD_TRADING_DAYS)
             log_event("WARN", "_force_overdue_exits", "forced 20D exit for stuck position", ticker=t)
@@ -885,7 +999,7 @@ def resolve_active_cycle(service, today=None):
                                    "no buy list yet — showing latest Golden file.")
                 return None   # עוד לא הייתה רשימת קנייה -> התנהגות קודמת
             return _build_cycle_result(last, completed, "WAITING_NEXT", latest, next_floor=floor)
-        positions = {t: compute_position_state(t, chosen["dt"]) for t, _, _ in rows}
+        positions = {t: compute_position_state(t, chosen["dt"], _px) for t, _, _, _px in rows}
         _force_overdue_exits(positions, chosen["dt"])
         # 🔧 31/10/2026 (ביקורת מערכתית, ממצא BOT-4): "אין נתונים" לא נקרא כ"לא יצאה". אם הורדות
         # המחירים נכשלו (Yahoo חסם/נפל) גם ל-QQQ וגם לפוזיציה - אי אפשר לגזור מצב מחזור, וקודם
@@ -914,7 +1028,7 @@ def _build_cycle_result(last, completed, state, latest, next_floor=None):
     chosen = last["file"]
     positions = last["positions"]
     watchlist = {}
-    for t, label, score in last["rows"]:
+    for t, label, score, _px in last["rows"]:
         p = positions.get(t)
         watchlist[t] = {
             "label": label, "score": score, "source": "Golden_Plan_STOCKS",
@@ -937,6 +1051,7 @@ def _build_cycle_result(last, completed, state, latest, next_floor=None):
         "latest_is_cycle_file": (latest["name"] == chosen["name"]),
         "completed": completed, "next_floor": next_floor,
     }
+    ctx["qqq_entry_px"], ctx["qqq_entry_src"] = _qqq_px_at(chosen["dt"])
     logs = f"✅ Cycle #{last['no']} ({state}): {chosen['name']} — {len(positions)} positions"
     return {"watchlist": watchlist, "logs": logs, "file_dt": chosen["dt"], "context": ctx}
 
@@ -1430,14 +1545,24 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         if _prev:
             _pv = _prev[-1]
             report.append(f"Prev cycle #{_pv['no']}: {_pv['ret']:+.1f}% (equal weight)")
+    _cyc_mode = bool(CYCLE_CONTEXT and CYCLE_CONTEXT.get("entry_date"))
     if golden_file_dt is not None:
-        report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
+        if _cyc_mode:
+            _fe = _file_et(golden_file_dt)
+            report.append(f"Entry = Golden price at {_fe.strftime('%d/%m %H:%M')} ET | "
+                          f"SL = open {CYCLE_CONTEXT['entry_date'].strftime('%d/%m')} -{STOP_LOSS_PCT*100:.0f}% | "
+                          f"QQQ base: {CYCLE_CONTEXT.get('qqq_entry_src') or 'n/a'}")
+        else:
+            report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
     report.append("-" * 64)
     report.append("Type | Ticker | Entry | Price | Day% | Wk% | P&L% | vsQQQ | Status")
     report.append("-" * 64)
 
     # QQQ baseline פעם אחת — אותה נקודת כניסה לכל הפוזיציות
-    qqq_entry_date, qqq_entry_open = get_entry_baseline("QQQ", golden_file_dt)
+    if _cyc_mode:
+        qqq_entry_date, qqq_entry_open = None, None   # מצב מחזור: בסיס QQQ = מחירו ברגע ה-Golden (_qqq_ret_between)
+    else:
+        qqq_entry_date, qqq_entry_open = get_entry_baseline("QQQ", golden_file_dt)
     qqq_curr = None
     try:
         qqq_session = get_latest_rth_session("QQQ", period="5d")
@@ -1451,7 +1576,8 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         qqq_ret = calc_pct_change(qqq_curr, qqq_entry_open)
     if CYCLE_CONTEXT and CYCLE_CONTEXT.get("entry_date"):
         # מצב מחזור: QQQ מאותה כניסה, ומוקפא ליום היציאה האחרונה כשהמחזור הסתיים
-        _q = _qqq_ret_between(CYCLE_CONTEXT["entry_date"], CYCLE_CONTEXT.get("end_date"))
+        _q = _qqq_ret_between(CYCLE_CONTEXT["entry_date"], CYCLE_CONTEXT.get("end_date"),
+                              base=CYCLE_CONTEXT.get("qqq_entry_px"))
         if _q is not None:
             qqq_ret = _q
 
@@ -1464,7 +1590,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             _pos = info.get("pos")
             if _pos and _pos.get("status") in ("SL", "20D") and _pos.get("entry_open"):
                 _pnl = calc_pct_change(_pos["exit_price"], _pos["entry_open"])
-                _q = _qqq_ret_between(_pos["entry_date"], _pos["exit_date"])
+                _q = _qqq_ret_between(_pos["entry_date"], _pos["exit_date"], base=CYCLE_CONTEXT.get("qqq_entry_px"))
                 _vs = f"{(_pnl - _q):>+5.1f}" if _q is not None else "  —  "
                 total_invest += 1.0
                 total_pnl_weighted += _pnl
@@ -1493,8 +1619,9 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             prev_close_s = extract_col(prev_close_df, "Close")
             if prev_close_s is not None:
                 prev_close_s = prev_close_s.dropna()
-            # ה-iloc[-1] הוא היום הנוכחי, iloc[-2] הוא סגירת אתמול האמיתית
-            prev_p = float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open
+            # 🔧 02/11/2026: סגירת אתמול לפי תאריך (לא iloc[-2]) - עמיד לבר יום חסר/חלקי
+            _pc = _prev_close_before(prev_close_s, _session_date(session_df))
+            prev_p = _pc if _pc else (float(prev_close_s.iloc[-2]) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open)
             day_chg = calc_pct_change(curr_p, prev_p)   # מסגירת אתמול ✅
 
             wk_open = get_week_start_open(t)
@@ -1505,7 +1632,11 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             # ✅ P&L מאז הכניסה (יישור קו: פתיחת היום שאחרי קובץ Golden)
             pnl_str, vsqqq_str = "  —  ", "  —  "
             pnl_val = None  # ✅ Sprint 1: entry-relative P&L ל-status
-            _, entry_open = get_entry_baseline(t, golden_file_dt)
+            _pos_l = info.get("pos")
+            if _pos_l and _pos_l.get("entry_open"):
+                entry_open = _pos_l["entry_open"]   # מחיר ה-Golden (Current) - אפיון 02/11
+            else:
+                _, entry_open = get_entry_baseline(t, golden_file_dt)
             if entry_open and entry_open > 0:
                 pnl = calc_pct_change(curr_p, entry_open)
                 pnl_val = pnl
@@ -1558,8 +1689,8 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
                     report.append(perf_line)
         except Exception as e:
             log_event("ERROR", "get_portfolio_performance", "perf history block failed - report continues", error=str(e)[:160])
-    elif golden_file_dt is not None and qqq_entry_open is None:
-        report.append("📊 Alpha: — (יום הכניסה טרם נסחר)")
+    elif golden_file_dt is not None and ((qqq_ret is None) if _cyc_mode else (qqq_entry_open is None)):
+        report.append("📊 Alpha: — (QQQ baseline unavailable)" if _cyc_mode else "📊 Alpha: — (יום הכניסה טרם נסחר)")
 
     return "\n".join(report) + "\n"
 
@@ -2109,7 +2240,9 @@ def compute_intraday_metrics(ticker, spy_day_chg=0.0, require_min_weekly_change=
     prev_close_s = extract_col(prev_close_df, "Close")
     if prev_close_s is not None:
         prev_close_s = prev_close_s.dropna()
-    prev_p = safe_float(prev_close_s.iloc[-2], day_open) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open
+    # 🔧 02/11/2026: סגירת אתמול לפי תאריך (לא iloc[-2]) - עמיד לבר יום חסר/חלקי
+    _pc = _prev_close_before(prev_close_s, _session_date(session_df))
+    prev_p = _pc if _pc else (safe_float(prev_close_s.iloc[-2], day_open) if prev_close_s is not None and len(prev_close_s) >= 2 else day_open)
     day_chg = calc_pct_change(curr_p, prev_p)   # מסגירת אתמול ✅
 
     wk_open = safe_float(get_week_start_open(ticker), 0.0)
