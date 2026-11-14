@@ -52,6 +52,13 @@ SIGNAL_HISTORY_FILE_ID = "1c3uo8Okn0dBDyWfMDvl8UoL-N0Qdw-_eYwoEcrdjVHw"
 # למעלה — Google Doc ריק חדש, לשתף עם אותו service account, להדביק ID כאן.
 EXIT_BASELINE_FILE_ID = "1tEGATqVMyOEEWlNM7PFAbgAxT0IH0nED19qBrYYFEbw"
 
+# ⭐ Satellite Ledger (14/11/2026) — יומן כניסות מאוחרות של UnderRadar (נייר בלבד, חודש אחד).
+# הקמה: אותו תהליך כמו SIGNAL_HISTORY_FILE_ID — Google Doc ריק חדש (שם מוצע: "WTC_Satellite_Ledger"),
+# לשתף עם אותו service account (Editor), להדביק כאן את ה-ID. בלי ID: אין מעקב ואין התראה (רק אזהרה בסריקה).
+SATELLITE_LEDGER_FILE_ID = "sentinel-handler@project-c833aec6-507e-4e48-bb7.iam.gserviceaccount.com"
+SATELLITE_MAX_SLOTS = 2          # מקסימום Satellite פעילים במקביל (סה"כ עד 5 עם ה-Anchor)
+SATELLITE_RECENT_DAYS = 30       # אותה מניה לא נרשמת שוב בתוך תקופה זו
+
 SELECTION_PATTERN = r"Anchor|Turbo|Top 5"
 RTH_TZ = "America/New_York"
 # 🕐 31/10/2026: שעת הקובץ בשם ה-Golden נוצרת ב-Colab עם datetime.now() ו-Colab רץ ב-UTC
@@ -904,6 +911,58 @@ def _cycle_pick_rows(service, f):
     return rows
 
 
+def _measurement_block(service, cx):
+    """
+    📐 14/11/2026: תמונת מצב *קריאה בלבד* לקובץ Golden האחרון כשהוא "מדידה בלבד" (לא המחזור הפעיל).
+    אותם כללים כמו המחזור הפעיל (כניסה = Current של ה-Golden, SL = Open של יום ה-Golden -15%,
+    Low יומי), אבל בלי השפעה על מחזור, Perf History, Cooldown או כל החלטה. כשל כאן לא מפיל את הדוח.
+    """
+    try:
+        if not cx or cx.get("latest_is_cycle_file"):
+            return []
+        name = cx.get("latest_name")
+        f = next((x for x in list_golden_files(service) if x.get("name") == name), None)
+        if f is None:
+            return []
+        picks = _cycle_pick_rows(service, f)
+        if not picks:
+            return []
+        fdt = f["dt"]
+        lines = [f"📐 MEASUREMENT cycle (NOT bought) — Golden {_file_et(fdt).strftime('%d/%m %H:%M')} ET",
+                 f"{'Ticker':<6} | {'Entry':>7} | {'Price':>7} | {'P&L':>7} | {'Status':<7} | SL (dist)"]
+        rets = []
+        for (t, _lbl, _sc, _px) in picks:
+            st = compute_position_state(t, fdt, _px)
+            if not st or st.get("entry_open") is None:
+                lines.append(f"{t:<6} | {'—':>7} | {'—':>7} | {'—':>7} | {'PENDING':<7} | —")
+                continue
+            e = st["entry_open"]
+            if st["status"] in ("SL", "20D") and st.get("exit_price"):
+                px = st["exit_price"]
+            else:
+                px = st.get("curr")
+            if not px:
+                lines.append(f"{t:<6} | {e:>7.2f} | {'—':>7} | {'—':>7} | {st['status']:<7} | —")
+                continue
+            r = calc_pct_change(px, e)
+            rets.append(r)
+            sl = st.get("sl_level")
+            sl_s = f"{sl:.2f} ({calc_pct_change(px, sl):+.1f}%)" if sl else "—"
+            lines.append(f"{t:<6} | {e:>7.2f} | {px:>7.2f} | {r:>+6.1f}% | {st['status']:<7} | {sl_s}")
+        if rets:
+            avg = sum(rets) / len(rets)
+            b, _src = _qqq_px_at(fdt)
+            q = _qqq_ret_between(_entry_target_date(fdt), base=b)
+            if q is not None:
+                lines.append(f"Avg: {avg:+.1f}% | QQQ: {q:+.1f}% | Alpha: {avg - q:+.1f}%")
+            else:
+                lines.append(f"Avg: {avg:+.1f}% | QQQ: —")
+        return lines
+    except Exception as e:
+        log_event("ERROR", "_measurement_block", "measurement block failed - report continues", error=str(e)[:160])
+        return []
+
+
 def _force_overdue_exits(positions, file_dt):
     """
     מניה שנתקעה (נמחקה/נרכשה/שונה שם/כשל yfinance) לא תיקבע לעולם כ"יצאה" לפי הנתונים
@@ -1715,6 +1774,15 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     elif golden_file_dt is not None and ((qqq_ret is None) if _cyc_mode else (qqq_entry_open is None)):
         report.append("📊 Alpha: — (QQQ baseline unavailable)" if _cyc_mode else "📊 Alpha: — (יום הכניסה טרם נסחר)")
 
+    # 📐 14/11/2026: מחזור מדידה (קריאה בלבד) - מופרד מהתיק ומהציון של המחזור הפעיל
+    _meas = _measurement_block(service, CYCLE_CONTEXT)
+    if _meas:
+        report.append("")
+        report.extend(_meas)
+
+    # ⭐ 14/11/2026: Satellite (UnderRadar BUY מאושר, נייר) - בלוק נפרד, לא נכנס לתשואת המחזור
+    report.extend(satellite_block(service))
+
     return "\n".join(report) + "\n"
 
 
@@ -1962,10 +2030,29 @@ def get_early_weakness_alerts(watchlist, service=None):
     )
 
 
+def _underdog_source(service, prefix):
+    """
+    🔧 14/11/2026: בריכת UnderRadar = שאריות ה-Golden של *המחזור הפעיל* (CYCLE_CONTEXT.file_name),
+    לא הקובץ האחרון בתיקייה. קודם: ריצת מדידה (למשל 09/11) החליפה את הבריכה לשאריות מחזור #2 בזמן
+    שמחזור #1 פעיל. כשל כלשהו / אין הקשר מחזור -> התנהגות קודמת (הקובץ האחרון).
+    """
+    try:
+        _name = (CYCLE_CONTEXT or {}).get("file_name")
+        if _name and service is not None:
+            f = next((x for x in list_golden_files(service) if x.get("name") == _name), None)
+            if f is not None:
+                df = _download_drive_df(service, f["id"], allow_empty=True)
+                if df is not None and not df.empty:
+                    return df, "CYCLE_FILE", _name
+    except Exception as e:
+        log_event("WARN", "_underdog_source", "cycle file unavailable - using latest Golden", error=str(e)[:160])
+    return download_latest_file(service, prefix)
+
+
 def build_underdog_list(service):
     underdogs = []
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS")]:  # ETF הוסר
-        df, status, _fname = download_latest_file(service, prefix)
+        df, status, _fname = _underdog_source(service, prefix)
         if df is None:
             log_event("WARN", "build_underdog_list", "missing output", prefix=prefix, status=status)
             continue
@@ -1996,6 +2083,180 @@ def build_underdog_list(service):
 # =========================================================
 # 8. EXECUTION SCAN
 # =========================================================
+# =========================================================
+# ⭐ SATELLITE (14/11/2026) — כניסות מאוחרות מ-UnderRadar, נייר בלבד
+# =========================================================
+_SAT_FIELDS = ["ticker", "entry_utc", "entry_px", "slot", "cycle_no", "wk_chg", "rsi",
+               "vwap_pct", "rvol", "rs", "dist_52w", "sig_score"]
+
+
+def _sat_configured():
+    return bool(SATELLITE_LEDGER_FILE_ID and "PASTE_YOUR" not in SATELLITE_LEDGER_FILE_ID)
+
+
+def satellite_read(service):
+    """רשימת רשומות מהיומן; None = לא מוגדר/נכשל (שונה מ-[] = יומן ריק)."""
+    if service is None or not _sat_configured():
+        return None
+    try:
+        res = service.files().export_media(fileId=SATELLITE_LEDGER_FILE_ID, mimeType='text/plain').execute()
+        out = []
+        for line in res.decode('utf-8-sig', errors='replace').split('\n'):
+            parts = line.lstrip('\ufeff\u200b\u200c\u200d ').strip().split(',')
+            if len(parts) != len(_SAT_FIELDS) or parts[0].lower() == "ticker":
+                continue
+            try:
+                rec = dict(zip(_SAT_FIELDS, parts))
+                rec["ticker"] = rec["ticker"].strip().upper()
+                rec["entry_dt"] = pd.Timestamp(rec["entry_utc"]).to_pydatetime()
+                rec["entry_px"] = float(rec["entry_px"])
+                rec["slot"] = int(float(rec["slot"]))
+                out.append(rec)
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        log_event("WARN", "satellite_read", "ledger read failed", error=str(e)[:160])
+        return None
+
+
+def satellite_append(service, rec):
+    """מוסיף רשומה ליומן. True רק אם נכתב."""
+    if service is None or not _sat_configured():
+        return False
+    try:
+        res = service.files().export_media(fileId=SATELLITE_LEDGER_FILE_ID, mimeType='text/plain').execute()
+        existing = _log_normalize(res.decode('utf-8-sig', errors='replace')) if res else ""
+        if not existing.strip():
+            existing = ",".join(_SAT_FIELDS) + "\n"
+        line = ",".join(str(rec.get(k, "")) for k in _SAT_FIELDS)
+        content = _log_normalize(existing + line)
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        service.files().update(fileId=SATELLITE_LEDGER_FILE_ID, media_body=media).execute()
+        return True
+    except Exception as e:
+        log_event("WARN", "satellite_append", "ledger write failed", error=str(e)[:160])
+        return False
+
+
+def _sat_state(rec):
+    """מצב הפוזיציה (כללי המחזור) לרשומת יומן: כניסה = מחיר ההתראה, SL = Open של יום ההתראה -15%."""
+    return compute_position_state(rec["ticker"], rec["entry_dt"], rec["entry_px"])
+
+
+def satellite_process(service, confirmed):
+    """
+    confirmed: [{ticker, px, wk_chg, rsi, vwap_pct, rvol, rs, dist_52w, sig_score}] - מניות עם BUY *מאושר*.
+    רושם ליומן (עד SATELLITE_MAX_SLOTS פעילות; השאר נרשמות slot=0 לסטטיסטיקה), ומחזיר
+    (alerts, notes): alerts = הודעות טלגרם נפרדות, notes = שורות אזהרה לסריקה.
+    """
+    alerts, notes = [], []
+    if not confirmed:
+        return alerts, notes
+    ledger = satellite_read(service)
+    if ledger is None:
+        names = ", ".join(c["ticker"] for c in confirmed)
+        notes.append(f"⚠️ Satellite ledger not configured/readable — confirmed BUY NOT tracked: {names}")
+        return alerts, notes
+    now = _dt.now(pytz.utc)
+    cutoff = SATELLITE_RECENT_DAYS * 86400
+    recent = {r["ticker"] for r in ledger
+              if (now - pd.Timestamp(r["entry_dt"]).tz_localize("UTC").to_pydatetime()
+                  if r["entry_dt"].tzinfo is None else now - r["entry_dt"]).total_seconds() < cutoff}
+    active = 0
+    for r in ledger:
+        if r["slot"] != 1:
+            continue
+        try:
+            st = _sat_state(r)
+        except Exception:
+            st = None
+        if st is None or st.get("status") in ("ACTIVE", "PENDING"):
+            active += 1
+    for c in confirmed:
+        t = c["ticker"]
+        if t in recent:
+            continue
+        slot = 1 if active < SATELLITE_MAX_SLOTS else 0
+        rec = {"ticker": t, "entry_utc": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "entry_px": round(float(c["px"]), 4),
+               "slot": slot, "cycle_no": (CYCLE_CONTEXT or {}).get("cycle_no", ""),
+               "wk_chg": round(c["wk_chg"], 2), "rsi": round(c["rsi"], 1), "vwap_pct": round(c["vwap_pct"], 2),
+               "rvol": round(c["rvol"], 2), "rs": round(c["rs"], 2),
+               "dist_52w": round(c["dist_52w"], 2) if c.get("dist_52w") is not None else "",
+               "sig_score": c["sig_score"]}
+        wrote = satellite_append(service, rec)
+        recent.add(t)
+        st = None
+        try:
+            st = compute_position_state(t, now, float(c["px"]))
+        except Exception:
+            pass
+        sl_txt = f"SL {st['sl_level']:.2f} (−{STOP_LOSS_PCT*100:.0f}% from open {_file_et(now).strftime('%d/%m')})" \
+            if st and st.get("sl_level") else "SL: n/a"
+        if slot == 1:
+            active += 1
+            head = "🚨🚨 SATELLITE ENTRY (paper — not a real buy) 🚨🚨"
+        else:
+            head = "📋 SATELLITE SIGNAL — slots full, recorded only (no position)"
+        msg = (f"{head}\n⭐ {t} @ {float(c['px']):.2f} | {sl_txt} | day 1/{HOLD_TRADING_DAYS}\n"
+               f"BUY confirmed (2 days) | score {c['sig_score']} | Wk {c['wk_chg']:+.1f}% | RSI {c['rsi']:.0f} | "
+               f"VWAP {c['vwap_pct']:+.1f}% | RVol {c['rvol']:.1f}x\n"
+               f"Slots used: {min(active, SATELLITE_MAX_SLOTS)}/{SATELLITE_MAX_SLOTS}"
+               + ("" if wrote else "\n⚠️ ledger write FAILED — not tracked"))
+        alerts.append(msg)
+    return alerts, notes
+
+
+def satellite_block(service):
+    """בלוק 'SATELLITE (paper)' לדוח התיק. קריאה בלבד; כשל לא מפיל את הדוח."""
+    try:
+        ledger = satellite_read(service)
+        if ledger is None:
+            return ["", "⭐ SATELLITE (paper): ledger not configured"] if not _sat_configured() else []
+        now = _dt.now(pytz.utc)
+        rows = []
+        for r in ledger:
+            dt0 = r["entry_dt"]
+            dt0 = pd.Timestamp(dt0).tz_localize("UTC").to_pydatetime() if dt0.tzinfo is None else dt0
+            if (now - dt0).days > 60:
+                continue
+            rows.append((r, dt0))
+        lines = ["", f"⭐ SATELLITE (paper, NOT bought) — max {SATELLITE_MAX_SLOTS} slots | entry = alert price | "
+                     f"SL = open of alert day -{STOP_LOSS_PCT*100:.0f}%"]
+        held = [(r, d) for r, d in rows if r["slot"] == 1]
+        missed = [r["ticker"] for r, _ in rows if r["slot"] != 1]
+        if not held:
+            lines.append("No Satellite entries yet.")
+        else:
+            lines.append(f"{'Ticker':<6} | {'Entry':>7} | {'Price':>7} | {'P&L':>7} | {'vsQQQ':>6} | Day   | {'Status':<7} | SL (dist) | Wk%@in")
+            rets = []
+            for r, d0 in held:
+                st = _sat_state({**r, "entry_dt": d0})
+                if not st or st.get("entry_open") is None:
+                    lines.append(f"{r['ticker']:<6} | {r['entry_px']:>7.2f} | {'—':>7} | {'—':>7} | {'—':>6} | —     | PENDING | —")
+                    continue
+                px = st["exit_price"] if (st["status"] in ("SL", "20D") and st.get("exit_price")) else st.get("curr")
+                if not px:
+                    continue
+                pnl = calc_pct_change(px, st["entry_open"])
+                rets.append(pnl)
+                qb, _src = _qqq_px_at(d0)
+                qr = _qqq_ret_between(_entry_target_date(d0), base=qb)
+                vs = f"{pnl - qr:+.1f}%" if qr is not None else "—"
+                sl = st.get("sl_level")
+                sl_s = f"{sl:.2f} ({calc_pct_change(px, sl):+.1f}%)" if sl else "—"
+                lines.append(f"{r['ticker']:<6} | {st['entry_open']:>7.2f} | {px:>7.2f} | {pnl:>+6.1f}% | {vs:>6} | "
+                             f"{st['days_held']:>2}/{HOLD_TRADING_DAYS} | {st['status']:<7} | {sl_s} | {r['wk_chg']}")
+            if rets:
+                lines.append(f"Avg Satellite: {sum(rets)/len(rets):+.1f}%")
+        if missed:
+            lines.append("Signals with slots full (recorded only): " + ", ".join(missed))
+        return lines
+    except Exception as e:
+        log_event("ERROR", "satellite_block", "satellite block failed - report continues", error=str(e)[:160])
+        return []
+
+
 def status_icon(st):
     return {"Brk": "🚀", "Wch": "👀", "Ext": "⚠️", "Bel": "❌"}.get(st, "•")
 
@@ -2367,6 +2628,8 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
         today_str = _dt4.now().strftime('%Y-%m-%d')
     signal_history = get_signal_history(service) if service is not None else {}
     eod_updates = {}
+    _sat_confirmed = []     # ⭐ BUY מאושר בריצה זו (למעקב Satellite)
+    _wk_dropped = []        # 📋 14/11/2026: מי נפל בסף ה-5% השבועי (לבדיקת סוף חודש)
 
     spy_session = get_latest_rth_session("SPY", period="5d")
     spy_close = extract_col(spy_session, "Close")
@@ -2379,6 +2642,8 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             metrics, drop_reason = compute_intraday_metrics(t, spy_day_chg=spy_day_chg)
             if metrics is None:
                 drop_counts[drop_reason] = drop_counts.get(drop_reason, 0) + 1
+                if drop_reason == "week_change_below_threshold":
+                    _wk_dropped.append(t)
                 continue
 
             status, sw, _ = classify_execution_status(
@@ -2405,6 +2670,11 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
             signal, _is_confirmed = confirm_buy_signal(signal, sig_score, t, signal_history, today_str)
             if is_eod:
                 eod_updates[t] = (today_str, sig_score)
+            if _is_confirmed:
+                _sat_confirmed.append({"ticker": t, "px": metrics["curr_p"], "wk_chg": metrics["wk_chg"],
+                                       "rsi": metrics["rsi"], "vwap_pct": metrics["vwap_pct"], "rvol": metrics["rvol"],
+                                       "rs": metrics["rs"], "dist_52w": metrics.get("dist_52w_high"),
+                                       "sig_score": sig_score})
             # ────────────────────────────────────────────────────────────────
 
             rows.append((
@@ -2423,12 +2693,30 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     rows.sort(key=lambda x: x[-1], reverse=True)
     rows = rows[:TOP_N]
 
+    # ⭐ Satellite: רישום + התראה נפרדת בטלגרם (כשל כאן לא מפיל את הסריקה)
+    _sat_notes = []
+    try:
+        _sat_alerts, _sat_notes = satellite_process(service, _sat_confirmed)
+        for _am in _sat_alerts:
+            try:
+                send_msg(_am)
+            except Exception as e:
+                log_event("ERROR", "run_execution_scan", "satellite alert send failed", error=str(e)[:160])
+            try:
+                log_to_drive(service, _am)
+            except Exception as e:
+                log_event("ERROR", "run_execution_scan", "satellite alert log failed", error=str(e)[:160])
+        _sat_notes = [("🚨 " + _am.split("\n")[1]) for _am in _sat_alerts] + _sat_notes
+    except Exception as e:
+        log_event("ERROR", "run_execution_scan", "satellite process failed", error=str(e)[:160])
+
     title = f"🎯 Execution Scan — UnderRadar | TOP {TOP_N} | Regime: {regime}"
     if market_note:
         title += f" | {market_note}"
 
     lines = [
         title,
+        *_sat_notes,
         "************************** HOT STOCKS ************************",
         "Ticker | Type | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | St | Rank | SIGNAL",
         "**************************************************************",
@@ -2447,6 +2735,8 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     if drop_counts:
         lines.append("--------------------------------------------------------------")
         lines.append("Drops: " + ", ".join(f"{k}={v}" for k, v in sorted(drop_counts.items())))
+        if _wk_dropped:
+            lines.append("Wk<5% dropped: " + ",".join(sorted(_wk_dropped)))
     lines.append("*********************** GOOD LUCK *****************************")
     return "\n".join(lines)
 
