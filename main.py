@@ -492,10 +492,10 @@ def build_dynamic_watchlist(service):
     CYCLE_CONTEXT.clear()
     CYCLE_NOTES.clear()
     try:
-        _cyc = resolve_active_cycle(service)
+        _cyc = resolve_cohorts(service) if COHORT_MODE else resolve_active_cycle(service)
     except Exception as e:
         _cyc = None
-        log_event("ERROR", "build_dynamic_watchlist", "resolve_active_cycle failed - legacy mode", error=str(e)[:200])
+        log_event("ERROR", "build_dynamic_watchlist", "cycle/cohort engine failed - legacy mode", error=str(e)[:200])
         if _dt.now(pytz.timezone(RTH_TZ)).date() >= CYCLE_START_DATE:
             CYCLE_NOTES.append("⚠️ Cycle engine FAILED this run — showing the LATEST Golden file, "
                                "which may be a measurement-only run. Do not act on it as holdings.")
@@ -633,6 +633,12 @@ STOP_LOSS_PCT = 0.15
 CYCLE_START_DATE = _date(2026, 11, 2)
 CYCLE_FILE_OVERRIDE = os.environ.get("ACTIVE_CYCLE_FILE", "").strip()
 CYCLE_CONTEXT = {}   # נכתב ע"י build_dynamic_watchlist, נקרא ע"י get_portfolio_performance
+# 🧪 14/11/2026 — מצב Cohorts: בדיקת מערכת בלי כסף אמיתי. כל שבוע = "חודש" חדש עצמאי
+# (ה-Golden *הראשון עם רשימה* בכל שבוע ISO), עם אותם כללים בדיוק. עד COHORT_MAX אחרונים מחושבים.
+COHORT_MODE = True
+COHORT_MAX = 12
+UNDERDOG_COHORTS = {}   # ticker -> [מספרי cohorts שהמניה שארית שלהם] (נכתב ע"י build_underdog_list)
+
 CYCLE_NOTES = []     # הודעות סטטוס (למשל: מנוע המחזור נכשל -> מוצג הקובץ האחרון), מוצגות בראש הדוח
 _GOLDEN_NAME_RE = _re.compile(r'^Golden_Plan_STOCKS_(\d{8})_(\d{6})')
 
@@ -1081,6 +1087,74 @@ def resolve_active_cycle(service, today=None):
         floor = _next_monday_after(last_exit)
         cycle_no += 1
     return None
+
+
+def resolve_cohorts(service, today=None):
+    """
+    🧪 14/11/2026: כל Golden שבועי = cohort עצמאי (קנייה ב-Current, SL מפתיחת יום ה-Golden,
+    HOLD_TRADING_DAYS ימים). בלי מצב שמור - הכל נגזר מקבצי ה-Golden ומהמחירים.
+    cohort = הקובץ *הראשון שיש בו Anchor/Turbo* בכל שבוע ISO (לפי תאריך ET), מ-CYCLE_START_DATE.
+    מחזיר None כשאין cohort (התנהגות קודמת), אחרת dict כמו resolve_active_cycle:
+    watchlist (איחוד הפוזיציות החיות), logs, file_dt, context (mode=COHORTS, cohorts=[...]).
+    """
+    today = today or _dt.now(pytz.timezone(RTH_TZ)).date()
+    if service is None or today < CYCLE_START_DATE:
+        return None
+    files = list_golden_files(service)
+    if not files:
+        return None
+    latest = files[-1]
+    by_week = {}
+    for f in sorted(files, key=lambda x: x["dt"]):
+        d_et = _file_et(f["dt"]).date()
+        if d_et < CYCLE_START_DATE:
+            continue
+        wk = d_et.isocalendar()[:2]
+        if wk in by_week:
+            continue
+        rows = _cycle_pick_rows(service, f)
+        if rows:
+            by_week[wk] = (f, rows)
+        else:
+            log_event("WARN", "resolve_cohorts", "Golden file has no Anchor/Turbo picks - skipped", file=f["name"])
+    if CYCLE_FILE_OVERRIDE:
+        ov = next((f for f in files if f["name"] == CYCLE_FILE_OVERRIDE), None)
+        if ov is not None:
+            rows = _cycle_pick_rows(service, ov)
+            if rows:
+                by_week[_file_et(ov["dt"]).date().isocalendar()[:2]] = (ov, rows)
+    if not by_week:
+        CYCLE_NOTES.append(f"ℹ️ No Golden file with Anchor/Turbo picks since {CYCLE_START_DATE.strftime('%d/%m')} — "
+                           "no cohort yet — showing latest Golden file.")
+        return None
+    keys = sorted(by_week)
+    q_missing = _daily_ohlc("QQQ") is None
+    cohorts = []
+    for i, wk in enumerate(keys):
+        if i < len(keys) - COHORT_MAX:
+            continue
+        f, rows = by_week[wk]
+        no = i + 1
+        positions = {t: compute_position_state(t, f["dt"], _px) for t, _, _, _px in rows}
+        _force_overdue_exits(positions, f["dt"])
+        if any(p is None for p in positions.values()) and q_missing:
+            raise RuntimeError(f"price data unavailable for cohort {no} - state cannot be derived")
+        all_exited = all(p is not None and p["status"] in ("SL", "20D") for p in positions.values())
+        res = _build_cycle_result({"no": no, "file": f, "rows": rows, "positions": positions}, [],
+                                  "WAITING_NEXT" if all_exited else "ACTIVE", latest)
+        cohorts.append({"no": no, "state": "DONE" if all_exited else "ACTIVE", "file": f,
+                        "ctx": res["context"], "watchlist": res["watchlist"], "positions": positions})
+    live = [c for c in cohorts if c["state"] == "ACTIVE"]
+    union = {}
+    for c in live:
+        for t, info in c["watchlist"].items():
+            union.setdefault(t, info)
+    newest = live[-1] if live else cohorts[-1]
+    ctx = {"mode": "COHORTS", "cohorts": cohorts, "cycle_no": newest["no"], "file_name": newest["file"]["name"],
+           "latest_name": latest["name"], "latest_dt": latest["dt"]}
+    logs = (f"✅ Cohorts: {len(live)} live, {len(cohorts) - len(live)} completed "
+            f"(newest #{newest['no']}: {newest['file']['name']})")
+    return {"watchlist": union, "logs": logs, "file_dt": newest["file"]["dt"], "context": ctx}
 
 
 def _build_cycle_result(last, completed, state, latest, next_floor=None):
@@ -1591,16 +1665,23 @@ def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_l
     return "🔻 Deep", "Below acceptable strength (SL not hit)"
 
 
-def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
+def get_portfolio_performance(watchlist, golden_file_dt=None, service=None, ctx=None, section=False, out=None):
+    # 🧪 14/11/2026: במצב cohorts הדוח מורכב מקטעי cohort (section=True, ctx של ה-cohort, out = מילון תוצאות)
+    if ctx is None and CYCLE_CONTEXT.get("mode") == "COHORTS":
+        return _cohorts_report(service)
     if not watchlist:
         return "📈 My Portfolio Watch (Dynamic)\n------------------------------\n⚠️ Watchlist empty\n"
 
     report = []
-    report.append("📈 My Portfolio Watch (Dynamic)")
-    for _n in CYCLE_NOTES:
-        report.append(_n)
-    _cx = CYCLE_CONTEXT
-    if _cx:
+    if not section:
+        report.append("📈 My Portfolio Watch (Dynamic)")
+        for _n in CYCLE_NOTES:
+            report.append(_n)
+    _cx = CYCLE_CONTEXT if ctx is None else ctx
+    if section:
+        report.append(f"=== Cohort #{_cx['cycle_no']} | Golden {_file_et(_cx['file_dt']).strftime('%d/%m %H:%M')} ET | "
+                      f"day {_cx['days_held']}/{HOLD_TRADING_DAYS} | exited {_cx['n_exited']}/{_cx['n_total']} ===")
+    elif _cx:
         # 🔁 31/10/2026: כותרת מחזור + תיוג ריצות מדידה
         _st = _cx.get("state")
         if _st == "ACTIVE":
@@ -1627,13 +1708,13 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         if _prev:
             _pv = _prev[-1]
             report.append(f"Prev cycle #{_pv['no']}: {_pv['ret']:+.1f}% (equal weight)")
-    _cyc_mode = bool(CYCLE_CONTEXT and CYCLE_CONTEXT.get("entry_date"))
+    _cyc_mode = bool(_cx and _cx.get("entry_date"))
     if golden_file_dt is not None:
         if _cyc_mode:
             _fe = _file_et(golden_file_dt)
             report.append(f"Entry = Golden price at {_fe.strftime('%d/%m %H:%M')} ET | "
-                          f"SL = open {CYCLE_CONTEXT['entry_date'].strftime('%d/%m')} -{STOP_LOSS_PCT*100:.0f}% | "
-                          f"QQQ base: {CYCLE_CONTEXT.get('qqq_entry_src') or 'n/a'}")
+                          f"SL = open {_cx['entry_date'].strftime('%d/%m')} -{STOP_LOSS_PCT*100:.0f}% | "
+                          f"QQQ base: {_cx.get('qqq_entry_src') or 'n/a'}")
         else:
             report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
     report.append("-" * 64)
@@ -1656,10 +1737,10 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     qqq_ret = None
     if qqq_entry_open and qqq_curr:
         qqq_ret = calc_pct_change(qqq_curr, qqq_entry_open)
-    if CYCLE_CONTEXT and CYCLE_CONTEXT.get("entry_date"):
+    if _cx and _cx.get("entry_date"):
         # מצב מחזור: QQQ מאותה כניסה, ומוקפא ליום היציאה האחרונה כשהמחזור הסתיים
-        _q = _qqq_ret_between(CYCLE_CONTEXT["entry_date"], CYCLE_CONTEXT.get("end_date"),
-                              base=CYCLE_CONTEXT.get("qqq_entry_px"))
+        _q = _qqq_ret_between(_cx["entry_date"], _cx.get("end_date"),
+                              base=_cx.get("qqq_entry_px"))
         if _q is not None:
             qqq_ret = _q
 
@@ -1672,7 +1753,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             _pos = info.get("pos")
             if _pos and _pos.get("status") in ("SL", "20D") and _pos.get("entry_open"):
                 _pnl = calc_pct_change(_pos["exit_price"], _pos["entry_open"])
-                _q = _qqq_ret_between(_pos["entry_date"], _pos["exit_date"], base=CYCLE_CONTEXT.get("qqq_entry_px"))
+                _q = _qqq_ret_between(_pos["entry_date"], _pos["exit_date"], base=_cx.get("qqq_entry_px"))
                 _vs = f"{(_pnl - _q):>+5.1f}" if _q is not None else "  —  "
                 total_invest += 1.0
                 total_pnl_weighted += _pnl
@@ -1758,13 +1839,15 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         alpha = port_ret - qqq_ret
         icon = "✅" if alpha >= 0 else "🔻"
         report.append(f"📊 Portfolio: {port_ret:+.1f}% | QQQ: {qqq_ret:+.1f}% | Alpha: {alpha:+.1f}% {icon}")
+        if out is not None:
+            out.update({"port_ret": port_ret, "qqq_ret": qqq_ret, "alpha": alpha})
 
         # ✅ Perf History (27/07/2026) — תוקן 28/07/2026: עכשיו הכל בתוך try/except
         # אחד ברמת הקריאה עצמה. לפני התיקון, רק upsert/get היו מוגנים
         # פנימית — אבל format_perf_summary וההרכבה עצמה לא, ותקלה שם
         # הייתה יכולה להפיל את כל הדוח (כולל השליחה לטלגרם והלוג!).
         try:
-            if golden_file_dt is not None:
+            if golden_file_dt is not None and not section:
                 week_key = golden_file_dt.strftime('%Y-%m-%d')
                 upsert_perf_history(service, week_key, port_ret, qqq_ret, alpha)
                 history = get_perf_history(service)
@@ -1777,6 +1860,9 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         report.append("📊 Alpha: — (QQQ baseline unavailable)" if _cyc_mode else "📊 Alpha: — (יום הכניסה טרם נסחר)")
 
     # 📐 14/11/2026: מחזור מדידה (קריאה בלבד) - מופרד מהתיק ומהציון של המחזור הפעיל
+    if section:
+        return "\n".join(report) + "\n"
+
     _meas = _measurement_block(service, CYCLE_CONTEXT)
     if _meas:
         report.append("-------------------- MEASUREMENT (not bought) --------------------")
@@ -1785,6 +1871,90 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     # ⭐ 14/11/2026: Satellite (UnderRadar BUY מאושר, נייר) - בלוק נפרד, לא נכנס לתשואת המחזור
     report.extend(satellite_block(service))
 
+    return "\n".join(report) + "\n"
+
+
+def _cohort_final(c):
+    """(avg%, qqq%, alpha%) לcohort שהסתיים."""
+    rets = [calc_pct_change(p["exit_price"], p["entry_open"]) for p in c["positions"].values()
+            if p and p.get("exit_price") and p.get("entry_open")]
+    avg = float(np.mean(rets)) if rets else None
+    cx = c["ctx"]
+    q = _qqq_ret_between(cx["entry_date"], cx.get("end_date"), base=cx.get("qqq_entry_px")) if cx.get("entry_date") else None
+    return avg, q, (avg - q if (avg is not None and q is not None) else None)
+
+
+def _cohorts_report(service):
+    """
+    🧪 14/11/2026: דוח cohorts. סיכום בראש, אחריו טבלת סטטוס מלאה לכל cohort חי (לכל מניה: Status/SL),
+    שורה אחת לכל cohort שהסתיים, ובלוק Satellite מקובץ לפי cohort. נייר בלבד - אין כסף אמיתי.
+    """
+    cx = CYCLE_CONTEXT
+    cohorts = cx.get("cohorts") or []
+    live = [c for c in cohorts if c["state"] == "ACTIVE"]
+    done = [c for c in cohorts if c["state"] != "ACTIVE"]
+    report = ["📈 My Portfolio Watch (Dynamic)"]
+    report.extend(CYCLE_NOTES)
+    report.append(f"🧪 COHORTS — weekly system test (paper, no real money) | live {len(live)} | completed {len(done)}")
+    report.append(f"Each cohort = first Golden of the week | buy at Golden price | SL {STOP_LOSS_PCT*100:.0f}% (daily Low) "
+                  f"from open of Golden day | {HOLD_TRADING_DAYS} trading days | equal weight")
+    sections, stats = [], []
+    for c in live:
+        out = {}
+        try:
+            sections.append(get_portfolio_performance(c["watchlist"], c["file"]["dt"], service=service,
+                                                      ctx=c["ctx"], section=True, out=out))
+        except Exception as e:
+            sections.append(f"=== Cohort #{c['no']} === ⚠️ failed this run")
+            log_event("ERROR", "_cohorts_report", "cohort section failed", cohort=c["no"], error=str(e)[:160])
+        stats.append((c, out))
+    report.append("-" * 64)
+    report.append(f"{'Cohort':<6} | {'Golden':<6} | {'Day':>5} | {'Exited':<6} | {'Avg':>7} | {'QQQ':>7} | {'Alpha':>7}")
+    avgs, qs = [], []
+    for c, o in stats:
+        cxx = c["ctx"]
+        if o.get("port_ret") is not None:
+            avgs.append(o["port_ret"]); qs.append(o["qqq_ret"])
+            tail = f"{o['port_ret']:>+6.1f}% | {o['qqq_ret']:>+6.1f}% | {o['alpha']:>+6.1f}%"
+        else:
+            tail = f"{'—':>7} | {'—':>7} | {'—':>7}"
+        report.append(f"{'#' + str(c['no']):<6} | {cxx['file_dt'].strftime('%d/%m'):<6} | "
+                      f"{str(cxx['days_held']) + '/' + str(HOLD_TRADING_DAYS):>5} | "
+                      f"{str(cxx['n_exited']) + '/' + str(cxx['n_total']):<6} | {tail}")
+    if len(avgs) > 1:
+        report.append(f"All live cohorts avg: {np.mean(avgs):+.1f}% | QQQ {np.mean(qs):+.1f}% | "
+                      f"Alpha {np.mean(avgs) - np.mean(qs):+.1f}%")
+    for sec in sections:
+        report.append("")
+        report.append(sec.rstrip("\n"))
+    if done:
+        report.append("-------------------- COMPLETED COHORTS --------------------")
+        for c in done[-6:][::-1]:
+            avg, q, al = _cohort_final(c)
+            cxx = c["ctx"]
+            _e = cxx.get("end_date")
+            if avg is None:
+                report.append(f"✅ #{c['no']} Golden {cxx['file_dt'].strftime('%d/%m')} — final result n/a")
+            else:
+                report.append(f"✅ #{c['no']} Golden {cxx['file_dt'].strftime('%d/%m')} → {_e.strftime('%d/%m') if _e else '?'} | "
+                              f"final {avg:+.1f}% | QQQ {q:+.1f}% | Alpha {al:+.1f}%" if q is not None else
+                              f"✅ #{c['no']} Golden {cxx['file_dt'].strftime('%d/%m')} → {_e.strftime('%d/%m') if _e else '?'} | "
+                              f"final {avg:+.1f}% | QQQ n/a")
+    # Perf History: שורה לכל cohort (מפתח = תאריך ה-Golden), ואז שורת סיכום אחת
+    try:
+        for c, o in stats:
+            if o.get("port_ret") is not None:
+                upsert_perf_history(service, c["file"]["dt"].strftime('%Y-%m-%d'), o["port_ret"], o["qqq_ret"], o["alpha"])
+        for c in done[-6:]:
+            avg, q, al = _cohort_final(c)
+            if avg is not None and q is not None:
+                upsert_perf_history(service, c["file"]["dt"].strftime('%Y-%m-%d'), avg, q, al)
+        _pl = format_perf_summary(get_perf_history(service))
+        if _pl:
+            report.append(_pl)
+    except Exception as e:
+        log_event("ERROR", "_cohorts_report", "perf history block failed - report continues", error=str(e)[:160])
+    report.extend(satellite_block(service, [c["no"] for c in live]))
     return "\n".join(report) + "\n"
 
 
@@ -2032,12 +2202,22 @@ def get_early_weakness_alerts(watchlist, service=None):
     )
 
 
-def _underdog_source(service, prefix):
+def _underdog_source(service, prefix, name=None):
     """
     🔧 14/11/2026: בריכת UnderRadar = שאריות ה-Golden של *המחזור הפעיל* (CYCLE_CONTEXT.file_name),
     לא הקובץ האחרון בתיקייה. קודם: ריצת מדידה (למשל 09/11) החליפה את הבריכה לשאריות מחזור #2 בזמן
     שמחזור #1 פעיל. כשל כלשהו / אין הקשר מחזור -> התנהגות קודמת (הקובץ האחרון).
     """
+    if name is not None:
+        # 🧪 cohort ספציפי: בלי נפילה לקובץ אחר (כדי לא לתייג שאריות של קובץ אחר ב-cohort הזה)
+        try:
+            f = next((x for x in list_golden_files(service) if x.get("name") == name), None)
+            df = _download_drive_df(service, f["id"], allow_empty=True) if f is not None else None
+            if df is not None and not df.empty:
+                return df, "COHORT_FILE", name
+        except Exception as e:
+            log_event("WARN", "_underdog_source", "cohort file unavailable", file=name, error=str(e)[:160])
+        return None, "COHORT_FILE_MISSING", name
     try:
         _name = (CYCLE_CONTEXT or {}).get("file_name")
         if _name and service is not None:
@@ -2051,34 +2231,55 @@ def _underdog_source(service, prefix):
     return download_latest_file(service, prefix)
 
 
+def _underdogs_from_df(df, prefix, bucket, cohort_no, seen, underdogs):
+    """מוסיף ל-underdogs את השאריות (לא Anchor/Turbo) של קובץ Golden אחד. cohort_no=None -> בלי תיוג."""
+    tcol, sel, scol = validate_output_schema(df, prefix)
+    mask = ~df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
+    for _, row in df[mask].iterrows():
+        t = str(row[tcol]).strip().upper()
+        score = row.get(scol, np.nan) if scol else np.nan
+        if not t:
+            continue
+
+        # ✅ Tier_Score — משקל מ-V7
+        tier_score = safe_float(row.get("Tier_Score", np.nan), 50.0)
+
+        # ✅ Short_Warning — סינון HIGH_SHORT
+        short_warn = str(row.get("Short_Warning", "")).upper()
+        if "HIGH_SHORT" in short_warn:
+            log_event("INFO", "build_underdog_list", "filtered HIGH_SHORT", ticker=t, warning=short_warn)
+            continue
+
+        if cohort_no is not None:
+            tags = UNDERDOG_COHORTS.setdefault(t, [])
+            if cohort_no not in tags:
+                tags.append(cohort_no)
+        if t in seen:      # אותה מניה בכמה cohorts: נסרקת פעם אחת, מתויגת בכולם
+            continue
+        seen.add(t)
+        underdogs.append((t, bucket, score, tier_score))
+
+
 def build_underdog_list(service):
     underdogs = []
+    UNDERDOG_COHORTS.clear()
+    _live = []
+    if (CYCLE_CONTEXT or {}).get("mode") == "COHORTS":
+        _live = [c for c in (CYCLE_CONTEXT.get("cohorts") or []) if c.get("state") == "ACTIVE"]
+    seen = set()
     for prefix, bucket in [("Golden_Plan_STOCKS", "STOCKS")]:  # ETF הוסר
-        df, status, _fname = _underdog_source(service, prefix)
-        if df is None:
-            log_event("WARN", "build_underdog_list", "missing output", prefix=prefix, status=status)
-            continue
-        try:
-            tcol, sel, scol = validate_output_schema(df, prefix)
-            mask = ~df[sel].astype(str).str.contains(SELECTION_PATTERN, na=False, case=False)
-            for _, row in df[mask].iterrows():
-                t = str(row[tcol]).strip().upper()
-                score = row.get(scol, np.nan) if scol else np.nan
-                if not t:
-                    continue
-
-                # ✅ Tier_Score — משקל מ-V7
-                tier_score = safe_float(row.get("Tier_Score", np.nan), 50.0)
-
-                # ✅ Short_Warning — סינון HIGH_SHORT
-                short_warn = str(row.get("Short_Warning", "")).upper()
-                if "HIGH_SHORT" in short_warn:
-                    log_event("INFO", "build_underdog_list", "filtered HIGH_SHORT", ticker=t, warning=short_warn)
-                    continue
-
-                underdogs.append((t, bucket, score, tier_score))
-        except Exception as e:
-            log_event("ERROR", "build_underdog_list", "underdog build failed", prefix=prefix, error=str(e)[:160])
+        if _live:   # 🧪 14/11/2026: שאריות של *כל* ה-cohorts החיים, כל אחת מתויגת ב-cohort שלה
+            sources = [(c["no"],) + tuple(_underdog_source(service, prefix, c["file"]["name"])) for c in _live]
+        else:
+            sources = [(None,) + tuple(_underdog_source(service, prefix))]
+        for cohort_no, df, status, _fname in sources:
+            if df is None:
+                log_event("WARN", "build_underdog_list", "missing output", prefix=prefix, status=status)
+                continue
+            try:
+                _underdogs_from_df(df, prefix, bucket, cohort_no, seen, underdogs)
+            except Exception as e:
+                log_event("ERROR", "build_underdog_list", "underdog build failed", prefix=prefix, error=str(e)[:160])
     return underdogs
 
 
@@ -2146,11 +2347,20 @@ def _sat_state(rec):
     return compute_position_state(rec["ticker"], rec["entry_dt"], rec["entry_px"])
 
 
+def _sat_aware(dt0):
+    return pd.Timestamp(dt0).tz_localize("UTC").to_pydatetime() if getattr(dt0, "tzinfo", None) is None else dt0
+
+
+def _sat_coh(rec):
+    return str(rec.get("cycle_no", "")).strip()
+
+
 def satellite_process(service, confirmed):
     """
     confirmed: [{ticker, px, wk_chg, rsi, vwap_pct, rvol, rs, dist_52w, sig_score}] - מניות עם BUY *מאושר*.
-    רושם ליומן (עד SATELLITE_MAX_SLOTS פעילות; השאר נרשמות slot=0 לסטטיסטיקה), ומחזיר
-    (alerts, notes): alerts = הודעות טלגרם נפרדות, notes = שורות אזהרה לסריקה.
+    🧪 14/11/2026: Satellite נפרד *לכל cohort* (UNDERDOG_COHORTS ticker->cohorts; בלי מפה - cohort של ההקשר).
+    לכל (מניה, cohort): עד SATELLITE_MAX_SLOTS פעילות ב-cohort; השאר נרשמות slot=0 לסטטיסטיקה.
+    מחזיר (alerts, notes): alerts = הודעות טלגרם נפרדות, notes = שורות אזהרה לסריקה.
     """
     alerts, notes = [], []
     if not confirmed:
@@ -2162,10 +2372,9 @@ def satellite_process(service, confirmed):
         return alerts, notes
     now = _dt.now(pytz.utc)
     cutoff = SATELLITE_RECENT_DAYS * 86400
-    recent = {r["ticker"] for r in ledger
-              if (now - pd.Timestamp(r["entry_dt"]).tz_localize("UTC").to_pydatetime()
-                  if r["entry_dt"].tzinfo is None else now - r["entry_dt"]).total_seconds() < cutoff}
-    active = 0
+    recent = {(r["ticker"], _sat_coh(r)) for r in ledger
+              if (now - _sat_aware(r["entry_dt"])).total_seconds() < cutoff}
+    active = {}
     for r in ledger:
         if r["slot"] != 1:
             continue
@@ -2174,65 +2383,78 @@ def satellite_process(service, confirmed):
         except Exception:
             st = None
         if st is None or st.get("status") in ("ACTIVE", "PENDING"):
-            active += 1
+            active[_sat_coh(r)] = active.get(_sat_coh(r), 0) + 1
     for c in confirmed:
         t = c["ticker"]
-        if t in recent:
-            continue
-        slot = 1 if active < SATELLITE_MAX_SLOTS else 0
-        rec = {"ticker": t, "entry_utc": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "entry_px": round(float(c["px"]), 4),
-               "slot": slot, "cycle_no": (CYCLE_CONTEXT or {}).get("cycle_no", ""),
-               "wk_chg": round(c["wk_chg"], 2), "rsi": round(c["rsi"], 1), "vwap_pct": round(c["vwap_pct"], 2),
-               "rvol": round(c["rvol"], 2), "rs": round(c["rs"], 2),
-               "dist_52w": round(c["dist_52w"], 2) if c.get("dist_52w") is not None else "",
-               "sig_score": c["sig_score"]}
-        wrote = satellite_append(service, rec)
-        recent.add(t)
-        st = None
-        try:
-            st = compute_position_state(t, now, float(c["px"]))
-        except Exception:
-            pass
-        sl_txt = f"SL {st['sl_level']:.2f} (−{STOP_LOSS_PCT*100:.0f}% from open {_file_et(now).strftime('%d/%m')})" \
-            if st and st.get("sl_level") else "SL: n/a"
-        if slot == 1:
-            active += 1
-            head = "🚨🚨 SATELLITE ENTRY (paper — not a real buy) 🚨🚨"
-        else:
-            head = "📋 SATELLITE SIGNAL — slots full, recorded only (no position)"
-        msg = (f"{head}\n⭐ {t} @ {float(c['px']):.2f} | {sl_txt} | day 1/{HOLD_TRADING_DAYS}\n"
-               f"BUY confirmed (2 days) | score {c['sig_score']} | Wk {c['wk_chg']:+.1f}% | RSI {c['rsi']:.0f} | "
-               f"VWAP {c['vwap_pct']:+.1f}% | RVol {c['rvol']:.1f}x\n"
-               f"Slots used: {min(active, SATELLITE_MAX_SLOTS)}/{SATELLITE_MAX_SLOTS}"
-               + ("" if wrote else "\n⚠️ ledger write FAILED — not tracked"))
-        alerts.append(msg)
+        cohorts = UNDERDOG_COHORTS.get(t) or [(CYCLE_CONTEXT or {}).get("cycle_no", "")]
+        for coh in cohorts:
+            coh = str(coh)
+            if (t, coh) in recent:
+                continue
+            n_act = active.get(coh, 0)
+            slot = 1 if n_act < SATELLITE_MAX_SLOTS else 0
+            rec = {"ticker": t, "entry_utc": now.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "entry_px": round(float(c["px"]), 4),
+                   "slot": slot, "cycle_no": coh,
+                   "wk_chg": round(c["wk_chg"], 2), "rsi": round(c["rsi"], 1), "vwap_pct": round(c["vwap_pct"], 2),
+                   "rvol": round(c["rvol"], 2), "rs": round(c["rs"], 2),
+                   "dist_52w": round(c["dist_52w"], 2) if c.get("dist_52w") is not None else "",
+                   "sig_score": c["sig_score"]}
+            wrote = satellite_append(service, rec)
+            recent.add((t, coh))
+            st = None
+            try:
+                st = compute_position_state(t, now, float(c["px"]))
+            except Exception:
+                pass
+            sl_txt = f"SL {st['sl_level']:.2f} (−{STOP_LOSS_PCT*100:.0f}% from open {_file_et(now).strftime('%d/%m')})" \
+                if st and st.get("sl_level") else "SL: n/a"
+            if slot == 1:
+                active[coh] = n_act + 1
+                head = "🚨🚨 SATELLITE ENTRY (paper — not a real buy) 🚨🚨"
+            else:
+                head = "📋 SATELLITE SIGNAL — slots full, recorded only (no position)"
+            coh_txt = f" | cohort #{coh}" if coh else ""
+            msg = (f"{head}\n⭐ {t} @ {float(c['px']):.2f}{coh_txt} | {sl_txt} | day 1/{HOLD_TRADING_DAYS}\n"
+                   f"BUY confirmed (2 days) | score {c['sig_score']} | Wk {c['wk_chg']:+.1f}% | RSI {c['rsi']:.0f} | "
+                   f"VWAP {c['vwap_pct']:+.1f}% | RVol {c['rvol']:.1f}x\n"
+                   f"Slots used in cohort: {min(active.get(coh, 0), SATELLITE_MAX_SLOTS)}/{SATELLITE_MAX_SLOTS}"
+                   + ("" if wrote else "\n⚠️ ledger write FAILED — not tracked"))
+            alerts.append(msg)
     return alerts, notes
 
 
-def satellite_block(service):
-    """בלוק 'SATELLITE (paper)' לדוח התיק. קריאה בלבד; כשל לא מפיל את הדוח."""
+def satellite_block(service, live_cohorts=None):
+    """בלוק 'SATELLITE (paper)' לדוח, מקובץ לפי cohort. קריאה בלבד; כשל לא מפיל את הדוח."""
     try:
         ledger = satellite_read(service)
         if ledger is None:
             return ["-------------------- SATELLITE (paper) --------------------",
                     "⭐ SATELLITE (paper): ledger not configured"] if not _sat_configured() else []
         now = _dt.now(pytz.utc)
-        rows = []
+        groups = {}
         for r in ledger:
-            dt0 = r["entry_dt"]
-            dt0 = pd.Timestamp(dt0).tz_localize("UTC").to_pydatetime() if dt0.tzinfo is None else dt0
-            if (now - dt0).days > 60:
+            d0 = _sat_aware(r["entry_dt"])
+            if (now - d0).days > 60:
                 continue
-            rows.append((r, dt0))
+            groups.setdefault(_sat_coh(r), []).append((r, d0))
+        for c in (live_cohorts or []):
+            groups.setdefault(str(c), [])
         lines = ["-------------------- SATELLITE (paper) --------------------",
-                 f"⭐ SATELLITE (paper, NOT bought) — max {SATELLITE_MAX_SLOTS} slots | entry = alert price | "
-                     f"SL = open of alert day -{STOP_LOSS_PCT*100:.0f}%"]
-        held = [(r, d) for r, d in rows if r["slot"] == 1]
-        missed = [r["ticker"] for r, _ in rows if r["slot"] != 1]
-        if not held:
+                 f"⭐ SATELLITE (paper, NOT bought) — max {SATELLITE_MAX_SLOTS} slots per cohort | entry = alert price | "
+                 f"SL = open of alert day -{STOP_LOSS_PCT*100:.0f}%"]
+        if not groups:
             lines.append("No Satellite entries yet.")
-        else:
-            lines.append(f"{'Ticker':<6} | {'Entry':>7} | {'Price':>7} | {'P&L':>7} | {'vsQQQ':>6} | Day   | {'Status':<7} | SL (dist) | Wk%@in")
+            return lines
+
+        def _k(x):
+            return (0, int(x)) if x.isdigit() else (1, 0)
+        for coh in sorted(groups, key=_k):
+            rows = groups[coh]
+            held = [(r, d) for r, d in rows if r["slot"] == 1]
+            missed = [r["ticker"] for r, _ in rows if r["slot"] != 1]
+            lines.append(f"Cohort #{coh}: " + ("no entries yet" if not rows else f"{len(held)} entered"))
+            if held:
+                lines.append(f"{'Ticker':<6} | {'Entry':>7} | {'Price':>7} | {'P&L':>7} | {'vsQQQ':>6} | Day   | {'Status':<7} | SL (dist) | Wk%@in")
             rets = []
             for r, d0 in held:
                 st = _sat_state({**r, "entry_dt": d0})
@@ -2252,9 +2474,9 @@ def satellite_block(service):
                 lines.append(f"{r['ticker']:<6} | {st['entry_open']:>7.2f} | {px:>7.2f} | {pnl:>+6.1f}% | {vs:>6} | "
                              f"{st['days_held']:>2}/{HOLD_TRADING_DAYS} | {st['status']:<7} | {sl_s} | {r['wk_chg']}")
             if rets:
-                lines.append(f"Avg Satellite: {sum(rets)/len(rets):+.1f}%")
-        if missed:
-            lines.append("Signals with slots full (recorded only): " + ", ".join(missed))
+                lines.append(f"Avg Satellite (cohort #{coh}): {sum(rets)/len(rets):+.1f}%")
+            if missed:
+                lines.append(f"Signals with slots full (recorded only), cohort #{coh}: " + ", ".join(missed))
         return lines
     except Exception as e:
         log_event("ERROR", "satellite_block", "satellite block failed - report continues", error=str(e)[:160])
@@ -2718,8 +2940,13 @@ def run_execution_scan(service, regime="NEUTRAL", market_note=""):
     if market_note:
         title += f" | {market_note}"
 
+    _pool_note = []
+    if UNDERDOG_COHORTS:
+        _cs = sorted({c for v in UNDERDOG_COHORTS.values() for c in v})
+        _pool_note = ["Pool: leftovers of live cohorts " + ", ".join(f"#{c}" for c in _cs) + f" ({len(UNDERDOG_COHORTS)} tickers)"]
     lines = [
         title,
+        *_pool_note,
         *_sat_notes,
         "************************** HOT STOCKS ************************",
         "Ticker | Type | Price | Day% | Wk% | Score | RVol | RS | VWAP% | RSI | St | Rank | SIGNAL",
