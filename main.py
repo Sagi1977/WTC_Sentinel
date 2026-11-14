@@ -55,7 +55,7 @@ EXIT_BASELINE_FILE_ID = "1tEGATqVMyOEEWlNM7PFAbgAxT0IH0nED19qBrYYFEbw"
 # ⭐ Satellite Ledger (14/11/2026) — יומן כניסות מאוחרות של UnderRadar (נייר בלבד, חודש אחד).
 # הקמה: אותו תהליך כמו SIGNAL_HISTORY_FILE_ID — Google Doc ריק חדש (שם מוצע: "WTC_Satellite_Ledger"),
 # לשתף עם אותו service account (Editor), להדביק כאן את ה-ID. בלי ID: אין מעקב ואין התראה (רק אזהרה בסריקה).
-SATELLITE_LEDGER_FILE_ID = "sentinel-handler@project-c833aec6-507e-4e48-bb7.iam.gserviceaccount.com"
+SATELLITE_LEDGER_FILE_ID = "1_q5KSjDdZgRDkutdqgjVTgApXhQZePePX3swHPBp_sg"
 SATELLITE_MAX_SLOTS = 2          # מקסימום Satellite פעילים במקביל (סה"כ עד 5 עם ה-Anchor)
 SATELLITE_RECENT_DAYS = 30       # אותה מניה לא נרשמת שוב בתוך תקופה זו
 
