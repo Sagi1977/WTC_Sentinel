@@ -1575,7 +1575,9 @@ def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_l
             return "🟦 Hold", "Holding near entry"
         if pnl >= -4:
             return "⚠️ Weak", "Losing from entry"
-        return "❌ Bel", "Deep loss from entry"
+        # 🔧 14/11/2026: ❌ Bel שמור *רק* לפגיעה ב-SL (יציאה). ירידה עמוקה בלי פגיעה ב-SL = 🔻 Deep
+        # (במחזור אין יציאה שיקולית; ❌ ב--4% גרם להבנה שגויה "למכור").
+        return "🔻 Deep", "Deep loss from entry (SL not hit)"
 
     # fallback — ההיגיון הישן (למקרה שאין entry baseline)
     if wk_chg >= 8 and day_chg >= 1:
@@ -1586,7 +1588,7 @@ def classify_portfolio_status(day_chg, wk_chg, pnl=None, curr_price=None, stop_l
         return "🟦 Hold", "Holding near weekly base"
     if wk_chg >= 0 or day_chg > -2:
         return "⚠️ Weak", "Weak momentum / stalling"
-    return "❌ Bel", "Below acceptable strength"
+    return "🔻 Deep", "Below acceptable strength (SL not hit)"
 
 
 def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
@@ -1777,7 +1779,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
     # 📐 14/11/2026: מחזור מדידה (קריאה בלבד) - מופרד מהתיק ומהציון של המחזור הפעיל
     _meas = _measurement_block(service, CYCLE_CONTEXT)
     if _meas:
-        report.append("")
+        report.append("-------------------- MEASUREMENT (not bought) --------------------")
         report.extend(_meas)
 
     # ⭐ 14/11/2026: Satellite (UnderRadar BUY מאושר, נייר) - בלוק נפרד, לא נכנס לתשואת המחזור
@@ -2212,7 +2214,8 @@ def satellite_block(service):
     try:
         ledger = satellite_read(service)
         if ledger is None:
-            return ["", "⭐ SATELLITE (paper): ledger not configured"] if not _sat_configured() else []
+            return ["-------------------- SATELLITE (paper) --------------------",
+                    "⭐ SATELLITE (paper): ledger not configured"] if not _sat_configured() else []
         now = _dt.now(pytz.utc)
         rows = []
         for r in ledger:
@@ -2221,7 +2224,8 @@ def satellite_block(service):
             if (now - dt0).days > 60:
                 continue
             rows.append((r, dt0))
-        lines = ["", f"⭐ SATELLITE (paper, NOT bought) — max {SATELLITE_MAX_SLOTS} slots | entry = alert price | "
+        lines = ["-------------------- SATELLITE (paper) --------------------",
+                 f"⭐ SATELLITE (paper, NOT bought) — max {SATELLITE_MAX_SLOTS} slots | entry = alert price | "
                      f"SL = open of alert day -{STOP_LOSS_PCT*100:.0f}%"]
         held = [(r, d) for r, d in rows if r["slot"] == 1]
         missed = [r["ticker"] for r, _ in rows if r["slot"] != 1]
