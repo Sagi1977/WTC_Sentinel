@@ -1057,6 +1057,22 @@ def _build_cycle_result(last, completed, state, latest, next_floor=None):
 
 
 
+LOG_MAX_CHARS = 900_000   # תקרת Google Docs ~1.02M תווים; משאירים מרווח
+
+
+def _log_normalize(text):
+    """
+    🔧 14/11/2026 — תיקון באג ה-Daily Log: כל כתיבה היא סבב Doc -> text/plain -> Doc, וכל פסקה
+    *ריקה* בסבב הזה הוכפלה (רווח של n שורות ריקות הפך ל-2n). בכל כתיבה נוספת הרווחים גדלו בחזקות של 2
+    (נמדד בקובץ האמיתי: 75,770 מתוך 76,012 פסקאות ריקות, רווחים של 2/8/16/.../16384), ה-Doc התנפח לאלפי
+    עמודים, ותקרת 76,000 השורות מחקה את ההיסטוריה האמיתית (נשארו ~16 רשומות במקום שבוע).
+    הפתרון: לא נשארת אף שורה ריקה בטקסט שנכתב, ולכן אין מה להכפיל. מנקים גם BOM ו-CR (export של
+    Docs מחזיר CRLF), ומרחיקים רווחים בסוף שורה. זה גם מרפא את ה-Doc הקיים בכתיבה הבאה.
+    """
+    text = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
+    return '\n'.join(l.rstrip() for l in text.split('\n') if l.strip()) + '\n'
+
+
 def log_to_drive(service, message):
     """
     שומר כל הודעת טלגרם על ידי עדכון קובץ Google Doc קיים ב-Drive.
@@ -1135,7 +1151,7 @@ def log_to_drive(service, message):
 
             # משיכת התוכן הקיים מהקובץ
             res = service.files().export_media(fileId=FILE_ID, mimeType='text/plain').execute()
-            existing_content = res.decode('utf-8', errors='replace')
+            existing_content = _log_normalize(res.decode('utf-8', errors='replace'))
 
             # --- מנגנון ניקוי אוטומטי ---
             # פירוק הטקסט לשורות ושמירת 76,000 השורות האחרונות בלבד (מונע מהקובץ להתנפח)
@@ -1145,13 +1161,18 @@ def log_to_drive(service, message):
             # תווים), נותן כ-3.2 ימי היסטוריה בפועל. זו התקרה הפיזית של הגישה
             # הזו (מסמך יחיד) - לא ניתן להגיע ל-4 ימים מלאים בלי לצמצם את
             # אורך כל רשומה בנפרד, לא רק את מספר השורות הנשמרות.
+            # 🔧 14/11/2026: אחרי הניקוי אין שורות ריקות, ולכן הגבול האמיתי הוא תווים (תקרת ה-Doc),
+            # לא מספר שורות. חותכים בגבול שורה, ושומרים סימון קטיעה בראש.
             lines = existing_content.split('\n')
-            if len(lines) > 76000:
-                lines = lines[-76000:]  # חותך את ההיסטוריה הישנה
-                existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + '\n'.join(lines)
+            if len(lines) > 76000 or len(existing_content) > LOG_MAX_CHARS:
+                lines = lines[-76000:]
+                existing_content = '\n'.join(lines)
+                if len(existing_content) > LOG_MAX_CHARS:
+                    existing_content = existing_content[-LOG_MAX_CHARS:].split('\n', 1)[-1]
+                existing_content = "=== [LOG TRUNCATED - OLD DATA REMOVED] ===\n" + existing_content
 
-            # חיבור התוכן החדש לישן
-            new_content = existing_content + entry
+            # חיבור התוכן החדש לישן; הניקוי מוציא גם את השורה הריקה שבתחילת entry
+            new_content = _log_normalize(existing_content + entry)
 
             # בדיקה אופטימית שנייה, ממש לפני הכתיבה - מצמצמת את חלון התחרות
             meta_after = service.files().get(fileId=FILE_ID, fields='headRevisionId').execute()
@@ -1555,7 +1576,7 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
         else:
             report.append(f"Entry baseline: open of first session after {golden_file_dt.strftime('%d/%m %H:%M')}")
     report.append("-" * 64)
-    report.append("Type | Ticker | Entry | Price | Day% | Wk% | P&L% | vsQQQ | Status")
+    report.append("Type | Ticker | Entry | Price | Day% | Wk% | P&L% | vsQQQ | Status | SL (dist)")
     report.append("-" * 64)
 
     # QQQ baseline פעם אחת — אותה נקודת כניסה לכל הפוזיציות
@@ -1659,8 +1680,10 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None):
             lbl = str(info.get("label", "")).strip()
             lbl = (lbl[:7] + ".") if len(lbl) > 8 else lbl[:8]
             entry_str = f"{entry_open:>6.2f}" if entry_open and entry_open > 0 else f"{'—':>6}"
+            # 🆕 02/11/2026: רמת ה-SL והמרחק אליה (מהמחיר הנוכחי), כדי שיהיה ברור כמה קרוב למגע
+            sl_str = f"{sl:.2f} ({calc_pct_change(curr_p, sl):+.1f}%)" if sl > 0 else "—"
             report.append(
-                f"{lbl:<9} | {t:<6} | {entry_str} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {pnl_str}% | {vsqqq_str}% | {status}"
+                f"{lbl:<9} | {t:<6} | {entry_str} | {curr_p:>6.2f} | {day_chg:>+5.1f}% | {wk_chg:>+5.1f}% | {pnl_str}% | {vsqqq_str}% | {status} | {sl_str}"
             )
         except Exception as e:
             report.append(f"{'Err':<9} | {t:<6} | {'—':>6} | {'N/A':>6} | {'N/A':>5} | {'N/A':>5} | {'—':>5} | {'—':>5} | ❌")
