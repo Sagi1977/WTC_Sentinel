@@ -22,6 +22,9 @@ TOP_N = 10
 SHOW_DEBUG = str(os.environ.get("SHOW_DEBUG", "false")).lower() == "true"
 DRIVE_PREFIXES = ["Golden_Plan_STOCKS"]  # ETF הוסר — מיקוד במניות בלבד
 TELEGRAM_LOG_FOLDER_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"  # TELEGRAM WEB folder
+# 📄 24/11/2026: שמירת ה-PDF של כל ריצה ב-Drive (נוצרו ע"י המשתמש בתיקיית TELEGRAM WEB; ל-service account יש writer בירושה)
+REPORT_PDF_LATEST_FILE_ID = "1z6TQgicKdhuOJECQxSssKvS0hyy9DcTH"     # WTC_Report_latest.pdf - נדרס בכל ריצה
+REPORT_PDF_ARCHIVE_FOLDER_ID = "1QBXSNDgOY3OW57NC-7W_enK3BSa6CVad"  # תיקיית "WTC Reports" - עותק לכל ריצה
 
 # ✅ Sharpe/Sortino/Drawdown History (27/07/2026)
 # ---------------------------------------------------------------
@@ -229,6 +232,44 @@ def build_report_pdf(sections, title="WTC Sentinel"):
     cv.showPage()
     cv.save()
     return buf.getvalue()
+
+
+def save_pdf_to_drive(service, pdf_bytes, filename):
+    """
+    📄 24/11/2026: שומר את ה-PDF של הריצה ב-Drive, בלי תלות בטלגרם. מחזיר (latest_ok, archive_ok).
+    1) WTC_Report_latest.pdf (קובץ של המשתמש) - עדכון תוכן. עובד תמיד כי האחסון נספר על הבעלים;
+       גרסאות קודמות נשמרות ב-Drive (Manage versions, כ-30 יום).
+    2) עותק בשם הקובץ של הטלגרם בתיקיית "WTC Reports". זו *יצירת* קובץ ע"י ה-service account:
+       חשבונות שירות שנוצרו אחרי 15/04/2025 בלי מכסת אחסון ב-My Drive -> 403 storageQuotaExceeded.
+       במקרה כזה נרשמת אזהרה בלבד ונשאר רק הקובץ האחרון.
+    """
+    if service is None or not pdf_bytes:
+        return False, False
+    import io
+    from googleapiclient.http import MediaIoBaseUpload
+
+    def _media():
+        return MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False)
+
+    latest_ok = archive_ok = False
+    try:
+        service.files().update(fileId=REPORT_PDF_LATEST_FILE_ID, media_body=_media(),
+                               supportsAllDrives=True).execute()
+        latest_ok = True
+        log_event("INFO", "save_pdf_to_drive", "latest report pdf updated", size=len(pdf_bytes))
+    except Exception as e:
+        log_event("ERROR", "save_pdf_to_drive", "latest report pdf update failed", error=str(e)[:160])
+    try:
+        service.files().create(body={"name": filename, "parents": [REPORT_PDF_ARCHIVE_FOLDER_ID]},
+                               media_body=_media(), fields="id", supportsAllDrives=True).execute()
+        archive_ok = True
+        log_event("INFO", "save_pdf_to_drive", "archive report pdf created", name=filename)
+    except Exception as e:
+        _q = "storageQuota" in str(e)
+        log_event("WARN" if _q else "ERROR", "save_pdf_to_drive",
+                  "archive copy not created" + (" - service account has no Drive storage quota; only "
+                                                "WTC_Report_latest.pdf is kept" if _q else ""), error=str(e)[:160])
+    return latest_ok, archive_ok
 
 
 def send_pdf(pdf_bytes, filename, caption=""):
@@ -3276,6 +3317,13 @@ def main():
             _pdf = build_report_pdf(_secs, title=f"WTC Sentinel report - {_ts.replace('_', ' ')} (Israel time)")
             if _pdf:
                 _pdf_sent = send_pdf(_pdf, f"WTC_Report_{_ts}.pdf", caption=f"WTC full report {_ts.replace('_', ' ')}")
+                # 📄 24/11/2026: אותו PDF גם ל-Drive (תיקיית TELEGRAM WEB), בלי תלות בהצלחת הטלגרם
+                try:
+                    _lat_ok, _ = save_pdf_to_drive(service, _pdf, f"WTC_Report_{_ts}.pdf")
+                    drive_log_results.append(("report pdf", _lat_ok))
+                except Exception as e:
+                    drive_log_results.append(("report pdf", False))
+                    log_event("ERROR", "save_pdf_to_drive", "unexpected failure", error=str(e)[:160])
         except Exception as e:
             log_event("ERROR", "main", "pdf report failed - sending full text", error=str(e)[:160])
     try:
@@ -3325,7 +3373,7 @@ def main():
         recent_log_errors = [
             f"- {ev['where']}: {ev.get('error', ev['message'])}"
             for ev in DEBUG_EVENTS
-            if ev.get("level") == "ERROR" and ev.get("where") in ("log_to_drive", "get_drive_service")
+            if ev.get("level") == "ERROR" and ev.get("where") in ("log_to_drive", "get_drive_service", "save_pdf_to_drive")
         ][-5:]
         alert_text = (
             "🚨 DAILY LOG (Drive) — כשל כתיבה!\n"
