@@ -915,18 +915,65 @@ def _qqq_px_at(file_dt):
     return None, None
 
 
-def _qqq_ret_between(entry_date, end_date=None, base=None):
-    """תשואת QQQ מ-base (מחיר ברגע ה-Golden; בלעדיו Open של entry_date) ועד הסגירה התקפה האחרונה."""
+# 🔧 24/11/2026 (BOT-17): תוצאת הבדיקה של הקריאה *האחרונה* ל-_qqq_ret_between: (תאריך נדרש, תאריך QQQ אחרון)
+# או None. הקורא שומר אותה מיד אחרי הקריאה שלו (כדי שהודעה של cohort אחד לא תופיע אצל אחר).
+QQQ_LAST = {"stale": None}
+# הורדה חוזרת של QQQ פעם אחת בריצה אם נמצא מפגר (ייתכן שנשמר ב-cache לפני שהמניות הורדו). מתאפס בכל ריצה.
+QQQ_REFETCH = {"done": False}
+
+
+def _px_date(st):
+    """תאריך המחיר שלפיו פוזיציה נמדדת: יום היציאה אם יצאה, אחרת יום הסגירה התקפה האחרונה. None אם אין."""
+    if not st:
+        return None
+    if st.get("status") in ("SL", "20D") and st.get("exit_date") is not None:
+        return st["exit_date"]
+    return st.get("curr_date")
+
+
+def _qqq_ret_between(entry_date, end_date=None, base=None, required_date=None):
+    """
+    תשואת QQQ מ-base (מחיר ברגע ה-Golden; בלעדיו Open של entry_date) ועד הסגירה התקפה האחרונה.
+    🔧 24/11/2026 (BOT-17): קודם נלקחה הסגירה האחרונה הזמינה *בלי לבדוק את התאריך*. בריצת EOD
+    24/11 04:05 שורת 23/11 של QQQ עוד לא הייתה ב-Yahoo, המניות כבר כן -> QQQ של שישי (608) מול
+    מניות של שני (QQQ +7.0%), Alpha מנופח ב-~6.8 נק'. עכשיו: עם end_date נדרשת סגירה בדיוק ביום
+    הזה; עם required_date (יום המחיר העדכני ביותר של המניות) נדרשת סגירה ביום הזה או אחריו.
+    אחרת None -> "—" בדוח, בלי שורה ל-Perf History, וניסיון חוזר בריצה הבאה.
+    """
+    QQQ_LAST["stale"] = None
     try:
         df = _daily_ohlc("QQQ")
         if df is None:
             return None
+        _need = end_date if end_date is not None else required_date
+        if _need is not None:
+            _all = df["Close"].dropna()
+            if (_all.empty or _all.index[-1] < _need) and not QQQ_REFETCH["done"]:
+                QQQ_REFETCH["done"] = True   # אולי נשמר ב-cache לפני שהמניות הורדו - הורדה אחת נוספת בריצה
+                _key = ("yf_download", "QQQ", "2y", "1d", False)
+                _old = DATA_CACHE.pop(_key, None)
+                _df2 = _daily_ohlc("QQQ")
+                _all2 = _df2["Close"].dropna() if _df2 is not None else None
+                if _all2 is not None and not _all2.empty and (_all.empty or _all2.index[-1] > _all.index[-1]):
+                    df, _all = _df2, _all2            # חדש יותר - נשאר ב-cache
+                elif _old is not None:
+                    DATA_CACHE[_key] = _old           # ההורדה החוזרת נכשלה/לא חדשה - מחזירים את הישן לשאר הריצה
+            # מפגר = אין ל-QQQ שום סגירה ביום הנדרש או אחריו. חור היסטורי (יש סגירות מאוחרות יותר) אינו פיגור -
+            # שם נלקחת הסגירה האחרונה עד end_date, כמו קודם (אחרת ה-cohort לא היה נרשם לעולם).
+            if _all.empty or _all.index[-1] < _need:
+                QQQ_LAST["stale"] = (_need, _all.index[-1] if not _all.empty else None)
+                log_event("WARN", "_qqq_ret_between", "QQQ close older than positions - QQQ/Alpha withheld",
+                          qqq_last=str(QQQ_LAST["stale"][1]), required=str(_need))
+                return None
         sess = df[[d >= entry_date for d in df.index]]
         if end_date is not None:
             sess = sess[[d <= end_date for d in sess.index]]
         cl = sess["Close"].dropna()
         if sess.empty or cl.empty:
             return None
+        if end_date is not None and cl.index[-1] < end_date:
+            log_event("WARN", "_qqq_ret_between", "QQQ has no bar on end_date (history gap) - using previous close",
+                      qqq_last=str(cl.index[-1]), end_date=str(end_date))
         b = float(base) if (base is not None and not pd.isna(base) and float(base) > 0) else float(sess["Open"].iloc[0])
         return calc_pct_change(float(cl.iloc[-1]), b)
     except Exception as e:
@@ -956,7 +1003,8 @@ def compute_position_state(ticker, file_dt, entry_px=None):
             _cl = df["Close"].dropna()
             return {"status": "PENDING", "entry_date": entry_target, "entry_open": None,
                     "sl_level": None, "exit_date": None, "exit_price": None,
-                    "curr": float(_cl.iloc[-1]) if not _cl.empty else None, "days_held": 0}
+                    "curr": float(_cl.iloc[-1]) if not _cl.empty else None,
+                    "curr_date": _cl.index[-1] if not _cl.empty else None, "days_held": 0}
         open_ref = float(sess["Open"].iloc[0])
         if not open_ref > 0:
             return None
@@ -974,6 +1022,7 @@ def compute_position_state(ticker, file_dt, entry_px=None):
         state = {"entry_date": sess.index[0], "entry_open": entry_price, "open_ref": open_ref,
                  "entry_src": "GOLDEN" if px else "OPEN_FALLBACK", "sl_level": sl_level,
                  "curr": float(_sc.iloc[-1]) if not _sc.empty else None,
+                 "curr_date": _sc.index[-1] if not _sc.empty else None,
                  "days_held": int(min(len(sess), HOLD_TRADING_DAYS)),
                  "exit_date": None, "exit_price": None}
         if not hit.empty:
@@ -1082,7 +1131,7 @@ def _measurement_block(service, cx):
         fdt = f["dt"]
         lines = [f"📐 MEASUREMENT cycle (NOT bought) — Golden {_file_et(fdt).strftime('%d/%m %H:%M')} ET",
                  f"{'Ticker':<6} | {'Entry':>7} | {'Price':>7} | {'P&L':>7} | {'Status':<7} | SL (dist)"]
-        rets = []
+        rets, _dates = [], []
         for (t, _lbl, _sc, _px) in picks:
             st = compute_position_state(t, fdt, _px)
             if not st or st.get("entry_open") is None:
@@ -1098,13 +1147,15 @@ def _measurement_block(service, cx):
                 continue
             r = calc_pct_change(px, e)
             rets.append(r)
+            if _px_date(st) is not None:
+                _dates.append(_px_date(st))
             sl = st.get("sl_level")
             sl_s = f"{sl:.2f} ({calc_pct_change(px, sl):+.1f}%)" if sl else "—"
             lines.append(f"{t:<6} | {e:>7.2f} | {px:>7.2f} | {r:>+6.1f}% | {st['status']:<7} | {sl_s}")
         if rets:
             avg = sum(rets) / len(rets)
             b, _src = _qqq_px_at(fdt)
-            q = _qqq_ret_between(_entry_target_date(fdt), base=b)
+            q = _qqq_ret_between(_entry_target_date(fdt), base=b, required_date=max(_dates, default=None))
             if q is not None:
                 lines.append(f"Avg: {avg:+.1f}% | QQQ: {q:+.1f}% | Alpha: {avg - q:+.1f}%")
             else:
@@ -1881,12 +1932,25 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None, ctx=
     except Exception:
         qqq_curr = None
     qqq_ret = None
+    _stale_here = None
     if qqq_entry_open and qqq_curr:
         qqq_ret = calc_pct_change(qqq_curr, qqq_entry_open)
     if _cx and _cx.get("entry_date"):
         # מצב מחזור: QQQ מאותה כניסה, ומוקפא ליום היציאה האחרונה כשהמחזור הסתיים
+        # BOT-17: התאריך הנדרש = תאריך המחיר שבאמת משמש ל-P&L בטבלה למטה: יום היציאה לפוזיציה שיצאה,
+        # ויום הסשן התוך-יומי (get_latest_rth_session, אותה קריאה מה-cache) לפוזיציה פעילה.
+        _req_dates = []
+        for _t, _i in watchlist.items():
+            _p = (_i or {}).get("pos")
+            if _p and _p.get("status") in ("SL", "20D") and _p.get("entry_open"):
+                _d = _px_date(_p)
+            else:
+                _d = _session_date(get_latest_rth_session(_t, period="5d"))
+            if _d is not None:
+                _req_dates.append(_d)
         _q = _qqq_ret_between(_cx["entry_date"], _cx.get("end_date"),
-                              base=_cx.get("qqq_entry_px"))
+                              base=_cx.get("qqq_entry_px"), required_date=max(_req_dates, default=None))
+        _stale_here = QQQ_LAST["stale"]
         if _q is not None:
             qqq_ret = _q
 
@@ -2003,7 +2067,12 @@ def get_portfolio_performance(watchlist, golden_file_dt=None, service=None, ctx=
         except Exception as e:
             log_event("ERROR", "get_portfolio_performance", "perf history block failed - report continues", error=str(e)[:160])
     elif golden_file_dt is not None and ((qqq_ret is None) if _cyc_mode else (qqq_entry_open is None)):
-        report.append("📊 Alpha: — (QQQ baseline unavailable)" if _cyc_mode else "📊 Alpha: — (יום הכניסה טרם נסחר)")
+        if _cyc_mode and _stale_here:
+            _rq, _ql = _stale_here
+            report.append(f"📊 Alpha: — (QQQ close for {_rq.strftime('%d/%m')} not in Yahoo yet; last "
+                          f"{_ql.strftime('%d/%m') if _ql else 'none'}) — not recorded, retried next run")
+        else:
+            report.append("📊 Alpha: — (QQQ baseline unavailable)" if _cyc_mode else "📊 Alpha: — (יום הכניסה טרם נסחר)")
 
     # 📐 14/11/2026: מחזור מדידה (קריאה בלבד) - מופרד מהתיק ומהציון של המחזור הפעיל
     if section:
@@ -2613,7 +2682,9 @@ def satellite_block(service, live_cohorts=None):
                 pnl = calc_pct_change(px, st["entry_open"])
                 rets.append(pnl)
                 qb, _src = _qqq_px_at(d0)
-                qr = _qqq_ret_between(_entry_target_date(d0), base=qb)
+                # 🔧 24/11/2026 (BOT-18): פוזיציה שיצאה נמדדת מול QQQ עד יום היציאה (קודם: עד היום)
+                _ex = st.get("exit_date") if st["status"] in ("SL", "20D") else None
+                qr = _qqq_ret_between(_entry_target_date(d0), _ex, base=qb, required_date=_px_date(st))
                 vs = f"{pnl - qr:+.1f}%" if qr is not None else "—"
                 sl = st.get("sl_level")
                 sl_s = f"{sl:.2f} ({calc_pct_change(px, sl):+.1f}%)" if sl else "—"
@@ -3129,6 +3200,7 @@ def main():
     # שכשל חלקי לא ימנע דיווח של השאר.
     validate_environment()
     DATA_CACHE.clear()  # איפוס cache בכל ריצה — מבטיח נתונים טריים מ-yfinance
+    QQQ_LAST["stale"] = None; QQQ_REFETCH["done"] = False   # 🔧 24/11/2026 (BOT-17)
 
     try:
         service = get_drive_service()
