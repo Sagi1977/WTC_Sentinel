@@ -260,10 +260,20 @@ def append_pdf_to_month_archive(service, pdf_bytes, label, now_il):
     from googleapiclient.http import MediaIoBaseUpload
     try:
         from pypdf import PdfReader, PdfWriter
-    except Exception as e:
-        log_event("ERROR", "save_pdf_to_drive", "pypdf not installed - monthly archive skipped "
-                  "(add 'pypdf' to the workflow pip install)", error=str(e)[:120])
-        return False
+    except ImportError:
+        # 🔧 25/11/2026: התקנה עצמית (פעם אחת לריצה, ~3 שניות) - כדי שלא יידרש שינוי בקובץ ה-workflow
+        try:
+            import subprocess, sys
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pypdf"],
+                           check=True, timeout=180, capture_output=True)
+            import importlib
+            importlib.invalidate_caches()
+            from pypdf import PdfReader, PdfWriter
+            log_event("INFO", "save_pdf_to_drive", "pypdf installed at runtime")
+        except Exception as e:
+            log_event("ERROR", "save_pdf_to_drive", "pypdf missing and runtime install failed - monthly archive skipped",
+                      error=str(e)[:120])
+            return False
     name = _month_archive_name(now_il)
     fid = _find_in_archive(service, name)
     if not fid:
