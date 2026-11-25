@@ -24,7 +24,10 @@ DRIVE_PREFIXES = ["Golden_Plan_STOCKS"]  # ETF הוסר — מיקוד במני�
 TELEGRAM_LOG_FOLDER_ID = "1wl4RspMhAG8DwITH4gN_UngMri3kAlsy"  # TELEGRAM WEB folder
 # 📄 24/11/2026: שמירת ה-PDF של כל ריצה ב-Drive (נוצרו ע"י המשתמש בתיקיית TELEGRAM WEB; ל-service account יש writer בירושה)
 REPORT_PDF_LATEST_FILE_ID = "1z6TQgicKdhuOJECQxSssKvS0hyy9DcTH"     # WTC_Report_latest.pdf - נדרס בכל ריצה
-REPORT_PDF_ARCHIVE_FOLDER_ID = "1QBXSNDgOY3OW57NC-7W_enK3BSa6CVad"  # תיקיית "WTC Reports" - עותק לכל ריצה
+REPORT_PDF_ARCHIVE_FOLDER_ID = "1QBXSNDgOY3OW57NC-7W_enK3BSa6CVad"  # תיקיית "WTC Reports" - קובץ חודשי מצטבר
+# 🔧 25/11/2026: ל-service account אין מכסת אחסון -> לא יכול *ליצור* קבצים (2 ריצות ב-24/11, 0 עותקים בתיקייה).
+# במקום עותק לכל ריצה: קובץ לכל חודש, WTC_Reports_YYYY-MM.pdf, שנוצר מראש ע"י המשתמש (בבעלותו), והבוט
+# משרשר אליו את הדוח של כל ריצה בסוף הקובץ + סימנייה (Bookmark) עם שעת הריצה. האחסון נספר על הבעלים.
 
 # ✅ Sharpe/Sortino/Drawdown History (27/07/2026)
 # ---------------------------------------------------------------
@@ -234,41 +237,87 @@ def build_report_pdf(sections, title="WTC Sentinel"):
     return buf.getvalue()
 
 
-def save_pdf_to_drive(service, pdf_bytes, filename):
+def _month_archive_name(dt_il):
+    return f"WTC_Reports_{dt_il.strftime('%Y-%m')}.pdf"
+
+
+def _find_in_archive(service, name):
+    q = f"name = '{name}' and '{REPORT_PDF_ARCHIVE_FOLDER_ID}' in parents and trashed = false"
+    r = service.files().list(q=q, fields="files(id)", pageSize=2, supportsAllDrives=True,
+                             includeItemsFromAllDrives=True).execute()
+    f = r.get("files", [])
+    return f[0]["id"] if f else None
+
+
+def append_pdf_to_month_archive(service, pdf_bytes, label, now_il):
     """
-    📄 24/11/2026: שומר את ה-PDF של הריצה ב-Drive, בלי תלות בטלגרם. מחזיר (latest_ok, archive_ok).
-    1) WTC_Report_latest.pdf (קובץ של המשתמש) - עדכון תוכן. עובד תמיד כי האחסון נספר על הבעלים;
-       גרסאות קודמות נשמרות ב-Drive (Manage versions, כ-30 יום).
-    2) עותק בשם הקובץ של הטלגרם בתיקיית "WTC Reports". זו *יצירת* קובץ ע"י ה-service account:
-       חשבונות שירות שנוצרו אחרי 15/04/2025 בלי מכסת אחסון ב-My Drive -> 403 storageQuotaExceeded.
-       במקרה כזה נרשמת אזהרה בלבד ונשאר רק הקובץ האחרון.
+    משרשר את דוח הריצה לסוף WTC_Reports_YYYY-MM.pdf של החודש (שעון ישראל), עם סימנייה בשם label.
+    בדיקה אופטימית (md5Checksum) לפני הכתיבה, כמו ב-Daily Log, כדי שריצות חופפות לא ימחקו דוח זו של זו.
+    True רק אם נכתב. קובץ חודש חסר / pypdf חסר / כשל -> ERROR (מגיע להתראת הטלגרם), בלי לעצור את הריצה.
+    """
+    import io
+    import random
+    from googleapiclient.http import MediaIoBaseUpload
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except Exception as e:
+        log_event("ERROR", "save_pdf_to_drive", "pypdf not installed - monthly archive skipped "
+                  "(add 'pypdf' to the workflow pip install)", error=str(e)[:120])
+        return False
+    name = _month_archive_name(now_il)
+    fid = _find_in_archive(service, name)
+    if not fid:
+        log_event("ERROR", "save_pdf_to_drive", f"monthly archive file {name} missing in 'WTC Reports' - "
+                  "create it (any PDF with this exact name)")
+        return False
+    for attempt in range(1, 4):
+        md5_before = service.files().get(fileId=fid, fields="md5Checksum", supportsAllDrives=True).execute().get("md5Checksum")
+        old = service.files().get_media(fileId=fid, supportsAllDrives=True).execute()
+        w = PdfWriter()
+        w.append(PdfReader(io.BytesIO(old)))
+        w.append(PdfReader(io.BytesIO(pdf_bytes)), outline_item=label)
+        buf = io.BytesIO()
+        w.write(buf)
+        md5_after = service.files().get(fileId=fid, fields="md5Checksum", supportsAllDrives=True).execute().get("md5Checksum")
+        if md5_before != md5_after:
+            log_event("WARN", "save_pdf_to_drive", f"concurrent write on {name} - retry {attempt}/3")
+            time.sleep(0.5 + random.uniform(0, 1.5))
+            continue
+        service.files().update(fileId=fid, supportsAllDrives=True,
+                               media_body=MediaIoBaseUpload(io.BytesIO(buf.getvalue()), mimetype="application/pdf",
+                                                            resumable=False)).execute()
+        log_event("INFO", "save_pdf_to_drive", "report appended to monthly archive", name=name,
+                  pages=len(w.pages), size=len(buf.getvalue()))
+        return True
+    log_event("ERROR", "save_pdf_to_drive", f"gave up appending to {name} after 3 concurrent-write retries")
+    return False
+
+
+def save_pdf_to_drive(service, pdf_bytes, label, now_il=None):
+    """
+    📄 24/11/2026 (עודכן 25/11): שומר את ה-PDF של הריצה ב-Drive, בלי תלות בטלגרם. מחזיר (latest_ok, archive_ok).
+    1) WTC_Report_latest.pdf - נדרס בכל ריצה (תמיד הדוח האחרון; גרסאות קודמות ב-Manage versions כ-30 יום).
+    2) WTC Reports/WTC_Reports_YYYY-MM.pdf - כל הדוחות של החודש ברצף, סימנייה לכל ריצה.
     """
     if service is None or not pdf_bytes:
         return False, False
     import io
     from googleapiclient.http import MediaIoBaseUpload
-
-    def _media():
-        return MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False)
-
+    if now_il is None:
+        now_il = _dt.now(pytz.timezone("Asia/Jerusalem"))
     latest_ok = archive_ok = False
     try:
-        service.files().update(fileId=REPORT_PDF_LATEST_FILE_ID, media_body=_media(),
-                               supportsAllDrives=True).execute()
+        service.files().update(fileId=REPORT_PDF_LATEST_FILE_ID, supportsAllDrives=True,
+                               media_body=MediaIoBaseUpload(io.BytesIO(pdf_bytes), mimetype="application/pdf",
+                                                            resumable=False)).execute()
         latest_ok = True
         log_event("INFO", "save_pdf_to_drive", "latest report pdf updated", size=len(pdf_bytes))
     except Exception as e:
         log_event("ERROR", "save_pdf_to_drive", "latest report pdf update failed", error=str(e)[:160])
     try:
-        service.files().create(body={"name": filename, "parents": [REPORT_PDF_ARCHIVE_FOLDER_ID]},
-                               media_body=_media(), fields="id", supportsAllDrives=True).execute()
-        archive_ok = True
-        log_event("INFO", "save_pdf_to_drive", "archive report pdf created", name=filename)
+        archive_ok = append_pdf_to_month_archive(service, pdf_bytes, label, now_il)
     except Exception as e:
-        _q = "storageQuota" in str(e)
-        log_event("WARN" if _q else "ERROR", "save_pdf_to_drive",
-                  "archive copy not created" + (" - service account has no Drive storage quota; only "
-                                                "WTC_Report_latest.pdf is kept" if _q else ""), error=str(e)[:160])
+        log_event("ERROR", "save_pdf_to_drive", "monthly archive append failed", error=str(e)[:160])
     return latest_ok, archive_ok
 
 
@@ -3319,8 +3368,9 @@ def main():
                 _pdf_sent = send_pdf(_pdf, f"WTC_Report_{_ts}.pdf", caption=f"WTC full report {_ts.replace('_', ' ')}")
                 # 📄 24/11/2026: אותו PDF גם ל-Drive (תיקיית TELEGRAM WEB), בלי תלות בהצלחת הטלגרם
                 try:
-                    _lat_ok, _ = save_pdf_to_drive(service, _pdf, f"WTC_Report_{_ts}.pdf")
+                    _lat_ok, _arc_ok = save_pdf_to_drive(service, _pdf, _ts.replace('_', ' '))
                     drive_log_results.append(("report pdf", _lat_ok))
+                    drive_log_results.append(("report pdf archive", _arc_ok))
                 except Exception as e:
                     drive_log_results.append(("report pdf", False))
                     log_event("ERROR", "save_pdf_to_drive", "unexpected failure", error=str(e)[:160])
